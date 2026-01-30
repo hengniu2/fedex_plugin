@@ -60,7 +60,7 @@ class FedExAPI {
                 data: data
             };
         } catch (error) {
-            // console.error('Fetch error:', error);
+            console.error('Fetch error:', error);
             return {
                 success: false,
                 error: error.message
@@ -78,7 +78,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 sendResponse(result);
             })
             .catch(error => {
-                // console.error('API Error', error);
+                console.error('API Error', error);
                 sendResponse({
                     success: false,
                     error: error.message
@@ -95,7 +95,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         const url = `${API_CONFIG.baseUrl}/restapi/v1/customers/${API_CONFIG.customerId}/services`;
         
-        // console.log('[Background] Calling Services API:', url);
+        console.log('[Background] Calling Services API:', url);
 
         fetch(url, {
             method: 'GET',
@@ -105,10 +105,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             }
         })
         .then(response => {
-            // console.log('[Background] Services API response status:', response.status);
+            console.log('[Background] Services API response status:', response.status);
             if (!response.ok) {
                 return response.text().then(errorText => {
-                    // console.error('[Background] Services API error:', response.status, errorText);
+                    console.error('[Background] Services API error:', response.status, errorText);
                     sendResponse({
                         success: false,
                         error: `API error: ${response.status} - ${errorText}`
@@ -116,7 +116,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 });
             }
             return response.json().then(data => {
-                // console.log('[Background] Services API response received');
+                console.log('[Background] Services API response received');
                 sendResponse({
                     success: true,
                     data: data
@@ -124,7 +124,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             });
         })
         .catch(error => {
-            // console.error('[Background] Services API fetch error:', error);
+            console.error('[Background] Services API fetch error:', error);
             sendResponse({
                 success: false,
                 error: error.message
@@ -141,8 +141,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         const url = `${API_CONFIG.baseUrl}/restapi/v1/customers/${API_CONFIG.customerId}/quote`;
         
-        // console.log('[Background] Calling Quote API:', url);
-        // console.log('[Background] Request body:', JSON.stringify(request.requestBody, null, 2));
+        console.log('[Background] Calling Quote API:', url);
+        console.log('[Background] Request body:', JSON.stringify(request.requestBody, null, 2));
 
         fetch(url, {
             method: 'POST',
@@ -153,10 +153,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             body: JSON.stringify(request.requestBody)
         })
         .then(response => {
-            // console.log('[Background] Quote API response status:', response.status);
+            console.log('[Background] Quote API response status:', response.status);
             if (!response.ok) {
                 return response.text().then(errorText => {
-                    // console.error('[Background] Quote API error:', response.status, errorText);
+                    console.error('[Background] Quote API error:', response.status, errorText);
                     sendResponse({
                         success: false,
                         error: `API error: ${response.status} - ${errorText}`
@@ -164,19 +164,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 });
             }
             return response.json().then(data => {
-                // console.log('[Background] ========== Quote API Response ==========');
-                // console.log('[Background] Response status: SUCCESS');
-                // console.log('[Background] Response data:', JSON.stringify(data, null, 2));
+                console.log('[Background] ========== Quote API Response ==========');
+                console.log('[Background] Response status: SUCCESS');
+                console.log('[Background] Response data:', JSON.stringify(data, null, 2));
                 
                 if (data.totalAmount) {
-                    // console.log('[Background] ✓ Single service response - totalAmount:', data.totalAmount);
+                    console.log('[Background] ✓ Single service response - totalAmount:', data.totalAmount);
                 } else if (data.quotes && Array.isArray(data.quotes)) {
-                    // console.log('[Background] ✓ Multi-service response - quotes count:', data.quotes.length);
+                    console.log('[Background] ✓ Multi-service response - quotes count:', data.quotes.length);
                     data.quotes.forEach((quote, idx) => {
-                        // console.log(`[Background]   Quote ${idx + 1}: serviceCode="${quote.serviceCode}", totalAmount="${quote.totalAmount}"`);
+                        console.log(`[Background]   Quote ${idx + 1}: serviceCode="${quote.serviceCode}", totalAmount="${quote.totalAmount}"`);
                     });
                 }
-                // console.log('[Background] ============================================');
+                console.log('[Background] ============================================');
                 
                 sendResponse({
                     success: true,
@@ -185,7 +185,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             });
         })
         .catch(error => {
-            // console.error('[Background] Quote API fetch error:', error);
+            console.error('[Background] Quote API fetch error:', error);
             sendResponse({
                 success: false,
                 error: error.message
@@ -194,16 +194,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         
         return true;
     } else if (request.action === 'sendEmailNotification') {
-        // console.log('[Background] ========== Email Notification Request Received ==========');
-        // console.log('[Background] Email data:', JSON.stringify(request.emailData, null, 2));
+        console.log('[Background] ========== Email Notification Request Received ==========');
+        console.log('[Background] Email data:', JSON.stringify(request.emailData, null, 2));
         
         // Send email notification when quote API fails (non-blocking)
         // Don't wait for response - fire and forget
         sendEmailNotification(request.emailData)
             .then(result => {
-                // console.log('[Background] Email notification result:', result);
+                console.log('[Background] Email notification result:', result);
                 if (result.success) {
-                    // console.log('[Background] ✓ Email sent successfully!');
+                    console.log('[Background] ✓ Email sent successfully!');
                     // Also send message to content script to show in page console
                     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
                         if (tabs[0]) {
@@ -217,7 +217,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         }
                     });
                 } else {
-                    // console.error('[Background] ✗ Email failed to send:', result.error);
+                    console.error('[Background] ✗ Email failed to send:', result.error);
                     // Send error message to content script to show in page console
                     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
                         if (tabs[0]) {
@@ -233,7 +233,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 }
             })
             .catch(error => {
-                // console.error('[Background] Email notification error:', error);
+                console.error('[Background] Email notification error:', error);
                 // Send error message to content script
                 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
                     if (tabs[0]) {
@@ -273,39 +273,39 @@ const EMAILJS_CONFIG = {
 };
 
 async function sendEmailNotification(emailData) {
-    // console.log('[Background] ========== sendEmailNotification called ==========');
-    // console.log('[Background] Email data received:', emailData);
+    console.log('[Background] ========== sendEmailNotification called ==========');
+    console.log('[Background] Email data received:', emailData);
     
     try {
         // Validate email data
         if (!emailData || !emailData.toEmail) {
-            // console.error('[Background] ✗ Missing email data or recipient');
+            console.error('[Background] ✗ Missing email data or recipient');
             return {
                 success: false,
                 error: 'Missing email data or recipient'
             };
         }
         
-        // console.log('[Background] Recipient email:', emailData.toEmail);
+        console.log('[Background] Recipient email:', emailData.toEmail);
         
         // Check if EmailJS is configured
-        // console.log('[Background] Checking EmailJS configuration...');
-        // console.log('[Background] Service ID:', EMAILJS_CONFIG.serviceId);
-        // console.log('[Background] Template ID:', EMAILJS_CONFIG.templateId);
-        // console.log('[Background] Public Key:', EMAILJS_CONFIG.publicKey ? '***' + EMAILJS_CONFIG.publicKey.slice(-4) : 'NOT SET');
+        console.log('[Background] Checking EmailJS configuration...');
+        console.log('[Background] Service ID:', EMAILJS_CONFIG.serviceId);
+        console.log('[Background] Template ID:', EMAILJS_CONFIG.templateId);
+        console.log('[Background] Public Key:', EMAILJS_CONFIG.publicKey ? '***' + EMAILJS_CONFIG.publicKey.slice(-4) : 'NOT SET');
         
         if (EMAILJS_CONFIG.serviceId === 'YOUR_SERVICE_ID' || 
             EMAILJS_CONFIG.templateId === 'YOUR_TEMPLATE_ID' || 
             EMAILJS_CONFIG.publicKey === 'YOUR_PUBLIC_KEY') {
-            // console.error('[Background] ✗ EmailJS not configured! Please set up EmailJS credentials in background.js');
-            // console.error('[Background] Current config:', EMAILJS_CONFIG);
+            console.error('[Background] ✗ EmailJS not configured! Please set up EmailJS credentials in background.js');
+            console.error('[Background] Current config:', EMAILJS_CONFIG);
             return {
                 success: false,
                 error: 'EmailJS not configured. Please set up EmailJS credentials in background.js'
             };
         }
         
-        // console.log('[Background] ✓ EmailJS configuration looks good');
+        console.log('[Background] ✓ EmailJS configuration looks good');
         
         // Prepare email content
         const subject = 'FedEx Quote API Failure Notification';
@@ -316,8 +316,8 @@ async function sendEmailNotification(emailData) {
                        `Timestamp: ${emailData.timestamp || new Date().toISOString()}\n` +
                        `URL: ${emailData.pageUrl || 'N/A'}`;
         
-        // console.log('[Background] Email subject:', subject);
-        // console.log('[Background] Email message length:', message.length);
+        console.log('[Background] Email subject:', subject);
+        console.log('[Background] Email message length:', message.length);
         
         // Send email via EmailJS API
         const emailjsUrl = 'https://api.emailjs.com/api/v1.0/email/send';
@@ -333,14 +333,14 @@ async function sendEmailNotification(emailData) {
             }
         };
         
-        // console.log('[Background] Sending email to EmailJS API...');
-        // console.log('[Background] EmailJS URL:', emailjsUrl);
-        // console.log('[Background] Email payload (without sensitive data):', {
-        //     service_id: emailPayload.service_id,
-        //     template_id: emailPayload.template_id,
-        //     user_id: '***' + emailPayload.user_id.slice(-4),
-        //     template_params: emailPayload.template_params
-        // });
+        console.log('[Background] Sending email to EmailJS API...');
+        console.log('[Background] EmailJS URL:', emailjsUrl);
+        console.log('[Background] Email payload (without sensitive data):', {
+            service_id: emailPayload.service_id,
+            template_id: emailPayload.template_id,
+            user_id: '***' + emailPayload.user_id.slice(-4),
+            template_params: emailPayload.template_params
+        });
         
         const response = await fetch(emailjsUrl, {
             method: 'POST',
@@ -350,23 +350,40 @@ async function sendEmailNotification(emailData) {
             body: JSON.stringify(emailPayload)
         });
         
-        // console.log('[Background] EmailJS API response status:', response.status);
-        // console.log('[Background] EmailJS API response ok:', response.ok);
+        console.log('[Background] EmailJS API response status:', response.status);
+        console.log('[Background] EmailJS API response ok:', response.ok);
         
         if (!response.ok) {
             const errorText = await response.text();
-            // console.error('[Background] ✗ EmailJS API error response:', errorText);
-            // console.error('[Background] Response status:', response.status);
+            console.error('[Background] ✗ EmailJS API error response:', errorText);
+            console.error('[Background] Response status:', response.status);
             return {
                 success: false,
                 error: `EmailJS API error: ${response.status} - ${errorText}`
             };
         }
         
-        const responseData = await response.json();
-        // console.log('[Background] EmailJS API response data:', responseData);
-        // console.log('[Background] ✓ Email sent successfully to inbox!');
-        // console.log('[Background] ============================================');
+        // EmailJS sometimes returns "OK" as plain text instead of JSON
+        const responseText = await response.text();
+        console.log('[Background] EmailJS API response text:', responseText);
+        
+        let responseData;
+        try {
+            responseData = JSON.parse(responseText);
+            console.log('[Background] EmailJS API response data (parsed JSON):', responseData);
+        } catch (parseError) {
+            // If it's not JSON, check if it's a success message like "OK"
+            if (responseText.trim().toUpperCase() === 'OK' || response.status === 200) {
+                console.log('[Background] EmailJS API returned plain text success message');
+                responseData = { status: 'success', text: responseText };
+            } else {
+                console.warn('[Background] EmailJS API response is not JSON and not "OK":', responseText);
+                responseData = { status: 'unknown', text: responseText };
+            }
+        }
+        
+        console.log('[Background] ✓ Email sent successfully to inbox!');
+        console.log('[Background] ============================================');
         
         return {
             success: true,
@@ -374,9 +391,9 @@ async function sendEmailNotification(emailData) {
         };
         
     } catch (error) {
-        // console.error('[Background] ✗ Exception in sendEmailNotification:', error);
-        // console.error('[Background] Error message:', error.message);
-        // console.error('[Background] Error stack:', error.stack);
+        console.error('[Background] ✗ Exception in sendEmailNotification:', error);
+        console.error('[Background] Error message:', error.message);
+        console.error('[Background] Error stack:', error.stack);
         return {
             success: false,
             error: error.message
