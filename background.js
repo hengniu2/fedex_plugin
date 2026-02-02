@@ -7,6 +7,12 @@ const API_CONFIG = {
     }
 };
 
+const EMAILJS_CONFIG = {
+    serviceId: 'service_62c7sdm',        // Replace with your EmailJS Service ID
+    templateId: 'template_qhuf9ih',      // Replace with your EmailJS Template ID
+    publicKey: 'bKonCVnt2BerB3oxS'         // Replace with your EmailJS Public Key
+};
+
 class FedExAPI {
     constructor(config) {
         this.baseUrl = config.baseUrl;
@@ -69,7 +75,59 @@ class FedExAPI {
     }
 }
 
+// let serviceListCache = null;
 const fedExAPI = new FedExAPI(API_CONFIG);
+
+// ---- Quote API governor (prevents 429s) ----
+const QUOTE_GOV = {
+  minIntervalMs: 900,        // 1 request every ~0.9s (tune if needed)
+  cacheTtlMs: 2 * 60 * 1000, // 2 minutes cache
+  lastStartTs: 0,
+  inFlight: new Map(),       // key -> Promise
+  cache: new Map(),          // key -> { ts, payload }
+};
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+function makeQuoteKey(body) {
+  // Good enough: stable for identical payloads coming from your content script
+  return JSON.stringify(body);
+}
+
+async function throttleQuoteStart() {
+  const now = Date.now();
+  const wait = Math.max(0, QUOTE_GOV.lastStartTs + QUOTE_GOV.minIntervalMs - now);
+  if (wait > 0) await sleep(wait);
+  QUOTE_GOV.lastStartTs = Date.now();
+}
+
+async function fetchQuoteWithBackoff(url, options, maxRetries = 3) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    await throttleQuoteStart();
+
+    const res = await fetch(url, options);
+
+    if (res.status !== 429) return res;
+
+    // 429 handling
+    const retryAfterHeader = res.headers.get('Retry-After');
+    const retryAfterMs = retryAfterHeader ? (parseInt(retryAfterHeader, 10) * 1000) : 0;
+
+    // exponential backoff w/ cap (plus small jitter)
+    const backoffMs = Math.min(
+      8000,
+      (retryAfterMs || (500 * Math.pow(2, attempt))) + Math.floor(Math.random() * 250)
+    );
+
+    console.warn(`[Background] Quote API 429 - backing off ${backoffMs}ms (attempt ${attempt + 1}/${maxRetries + 1})`);
+    await sleep(backoffMs);
+  }
+
+  // If we got here, we exhausted retries
+  return null;
+}
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'fetchShipments') {
@@ -85,6 +143,104 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 });
             });
         
+        return true;
+    // } else if (request.action == 'fetchServices') {
+    //     if (serviceListCache) {
+    //         sendResponse({ success: true, data: serviceListCache });
+    //         return true;
+    //     }
+    //     fetch(`${request.origin}/api/seller/services`, {
+    //         method: 'GET',
+    //         // credentials: "include",
+    //         headers: {
+    //             'Content-Type': 'application/json'
+    //         }
+    //     }).then(response => {
+    //         if (!response.ok) throw new Error("Failed to fetch service list");
+    //         const data = response.json();
+    //         serviceListCache = data;
+    //         sendResponse({ success: true, data: data });
+    //     }).catch(error => {
+    //         console.error('[Background] Fetch Services API error:', error);
+    //         sendResponse({
+    //             success: false,
+    //             error: error.message
+    //         });
+    //     });
+    } else if (request.action == 'getShipmentGrids') {
+        const payload = {
+            page: { pageNumber: 1, pageSize: 250 },
+            filter: {
+            booleanFilters: [{ column: "IsVoid", value: false }]
+            },
+            searchTerm: ""
+        };
+        fetch(`${request.origin}/api/shippinggrid/simple`, {
+            method: 'POST',
+            // credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        }).then(response => response.json())
+        .then(json => { 
+            const f = json.fulfillments?.find(x =>
+                String(x.fulfillmentPlanId) === String(request.fulfillmentId)
+            );
+            const fp = json.fulfillmentPlans;
+
+            if (!f) throw new Error('Shipment not found');
+
+
+            const pkg = f.packages?.[0];
+            const shipFrom = f.labelFulfillment?.shipFrom?.originAddress;
+            const currency = fp?.[0]?.rateSummary?.rate?.totalCost?.code ?? fp?.labelConfiguration?.packages[0]?.insuredValue?.code;
+            const fp_options = fp?.[0]?.labelConfiguration?.options;
+            switch (fp_options?.confirmation) {
+                case 'Delivery':
+                    confirmation = 'DIRECT';
+                case 'Adult':
+                    confirmation = 'ADULT';
+                case 'Indirect':
+                    confirmation = 'INDIRECT';
+                case 'None':
+                    confirmation = null;
+            }
+            data = {
+                // json: json,
+                residential: f.labelFulfillment?.shipTo?.residentialIndicator?.toLowerCase() === 'residential',
+                signatureOptionCode: confirmation,
+                currency: currency,
+                customsCurrency: currency,
+
+                senderZip: shipFrom?.postalCode,
+                senderCountry: shipFrom?.countryCode || 'US',
+
+                receiverZip: f.labelFulfillment?.shipTo?.postalCode,
+                receiverCountry: f.labelFulfillment?.shipTo?.countryCode || 'US',
+
+                weightUnit: pkg?.weight?.unit,
+                weightValue: pkg?.weight?.value,
+
+                dimUnit: pkg?.dimensions?.unit,
+                length: pkg?.dimensions?.length,
+                width: pkg?.dimensions?.width,
+                height: pkg?.dimensions?.height,
+
+                insuranceAmount: pkg?.insuredValue?.value ?? null,
+
+                carrierId: f.labelFulfillment?.carrierId,
+                serviceId: f.labelFulfillment?.serviceId,
+
+                confirmation: f.confirmationType || null
+            };
+            sendResponse({ success: true, data: data });
+        }).catch(error => {
+            console.error('[Background] Get Shipments API fetch error:', error);
+            sendResponse({
+                success: false,
+                error: error.message
+            });
+        });
+
         return true;
     } else if (request.action === 'getServices') {
         const API_CONFIG = {
@@ -105,7 +261,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             }
         })
         .then(response => {
-            console.log('[Background] Services API response status:', response.status);
             if (!response.ok) {
                 return response.text().then(errorText => {
                     console.error('[Background] Services API error:', response.status, errorText);
@@ -140,58 +295,64 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         };
 
         const url = `${API_CONFIG.baseUrl}/restapi/v1/customers/${API_CONFIG.customerId}/quote`;
-        
-        console.log('[Background] Calling Quote API:', url);
-        console.log('[Background] Request body:', JSON.stringify(request.requestBody, null, 2));
+        const key = makeQuoteKey(request.requestBody);
 
-        fetch(url, {
+        // 1) Cache (fast return)
+        const cached = QUOTE_GOV.cache.get(key);
+        if (cached && (Date.now() - cached.ts) < QUOTE_GOV.cacheTtlMs) {
+            console.log('[Background] Quote API cache hit');
+            sendResponse({ success: true, data: cached.payload, cached: true });
+            return true;
+        }
+
+        // 2) In-flight de-dupe (if the same payload is already being fetched, reuse it)
+        const existing = QUOTE_GOV.inFlight.get(key);
+        if (existing) {
+            console.log('[Background] Quote API de-dupe (reusing in-flight request)');
+            existing
+            .then(data => sendResponse({ success: true, data, deduped: true }))
+            .catch(err => sendResponse({ success: false, error: err.message }));
+            return true;
+        }
+
+        console.log('[Background] Calling Quote API:', url);
+
+        const options = {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `RSIS ${API_CONFIG.apiKey}`
+            'Content-Type': 'application/json',
+            'Authorization': `RSIS ${API_CONFIG.apiKey}`
             },
             body: JSON.stringify(request.requestBody)
-        })
-        .then(response => {
-            console.log('[Background] Quote API response status:', response.status);
-            if (!response.ok) {
-                return response.text().then(errorText => {
-                    console.error('[Background] Quote API error:', response.status, errorText);
-                    sendResponse({
-                        success: false,
-                        error: `API error: ${response.status} - ${errorText}`
-                    });
-                });
+        };
+
+        const p = (async () => {
+            const res = await fetchQuoteWithBackoff(url, options, 3);
+            if (!res) throw new Error('API error: 429 (retries exhausted)');
+
+            if (!res.ok) {
+            const errorText = await res.text();
+            throw new Error(`API error: ${res.status} - ${errorText}`);
             }
-            return response.json().then(data => {
-                console.log('[Background] ========== Quote API Response ==========');
-                console.log('[Background] Response status: SUCCESS');
-                console.log('[Background] Response data:', JSON.stringify(data, null, 2));
-                
-                if (data.totalAmount) {
-                    console.log('[Background] ✓ Single service response - totalAmount:', data.totalAmount);
-                } else if (data.quotes && Array.isArray(data.quotes)) {
-                    console.log('[Background] ✓ Multi-service response - quotes count:', data.quotes.length);
-                    data.quotes.forEach((quote, idx) => {
-                        console.log(`[Background]   Quote ${idx + 1}: serviceCode="${quote.serviceCode}", totalAmount="${quote.totalAmount}"`);
-                    });
-                }
-                console.log('[Background] ============================================');
-                
-                sendResponse({
-                    success: true,
-                    data: data
-                });
-            });
-        })
-        .catch(error => {
-            console.error('[Background] Quote API fetch error:', error);
-            sendResponse({
-                success: false,
-                error: error.message
-            });
+
+            const data = await res.json();
+
+            // Save to cache
+            QUOTE_GOV.cache.set(key, { ts: Date.now(), payload: data });
+
+            return data;
+        })();
+
+        QUOTE_GOV.inFlight.set(key, p);
+
+        p.then(data => {
+            sendResponse({ success: true, data });
+        }).catch(err => {
+            sendResponse({ success: false, error: err.message });
+        }).finally(() => {
+            QUOTE_GOV.inFlight.delete(key);
         });
-        
+
         return true;
     } else if (request.action === 'sendEmailNotification') {
         console.log('[Background] ========== Email Notification Request Received ==========');
@@ -265,13 +426,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 //    - {{subject}}
 //    - {{message}}
 // 4. Copy your Service ID, Template ID, and Public Key
-// 5. Paste them below in EMAILJS_CONFIG
-const EMAILJS_CONFIG = {
-    serviceId: 'service_62c7sdm',        // Replace with your EmailJS Service ID
-    templateId: 'template_qhuf9ih',      // Replace with your EmailJS Template ID
-    publicKey: 'bKonCVnt2BerB3oxS'         // Replace with your EmailJS Public Key
-};
-
+// 5. Paste them inside in EMAILJS_CONFIG
 async function sendEmailNotification(emailData) {
     console.log('[Background] ========== sendEmailNotification called ==========');
     console.log('[Background] Email data received:', emailData);

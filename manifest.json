@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FedEx ShipStation Extension",
-  "version": "1.0.7",
+  "version": "1.0.8.1",
   "description": "Chrome extension for FedEx API integration with ShipStation",
   "permissions": [
     "storage",
@@ -18,7 +18,7 @@
   "content_scripts": [
     {
       "matches": ["*://*.shipstation.com/*"],
-      "js": ["content.js"],
+      "js": ["toast.js", "login.js", "helper.js", "content.js"],
       "css": ["styles.css"],
       "run_at": "document_idle"
     }
