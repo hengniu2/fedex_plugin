@@ -167,6 +167,33 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     //             error: error.message
     //         });
     //     });
+    } else if (request.action == 'getOrderGrids') {
+        const orderNumber = request.orderNumber || null;
+        const payload = {
+            page: { pageNumber: 1, pageSize: 250 },
+            filter: {
+                orderGridStatus: "AwaitingShipment"
+            },
+            orderBys: [{ orderBy: "OrderNumber", orderByDirection: "Ascending" }],
+            includeQueryCount: true
+        };
+        if (request.orderNumber) payload.searchTerm = String(orderNumber);
+        fetch(`${request.origin}/api/ordergrid/shipmentmode/simple`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        }).then(response => response.json())
+        .then(json => { 
+            sendResponse({ success: true, data: json });
+        }).catch(error => {
+            console.error('[Background] Get Shipments API fetch error:', error);
+            sendResponse({
+                success: false,
+                error: error.message
+            });
+        });
+
+        return true;
     } else if (request.action == 'getShipmentGrids') {
         const payload = {
             page: { pageNumber: 1, pageSize: 250 },
@@ -185,31 +212,52 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             const f = json.fulfillments?.find(x =>
                 String(x.fulfillmentPlanId) === String(request.fulfillmentId)
             );
-            const fp = json.fulfillmentPlans;
+
+            const fps = json.fulfillmentPlans || [];
+            const fulfillmentPlan = fps.find(fp =>
+                String(fp.fulfillmentPlanId || fp.id || '') === String(request.fulfillmentId)
+            ) || fps[0];
+            
 
             if (!f) throw new Error('Shipment not found');
 
-
             const pkg = f.packages?.[0];
             const shipFrom = f.labelFulfillment?.shipFrom?.originAddress;
-            const currency = fp?.[0]?.rateSummary?.rate?.totalCost?.code ?? fp?.labelConfiguration?.packages[0]?.insuredValue?.code;
-            const fp_options = fp?.[0]?.labelConfiguration?.options;
-            switch (fp_options?.confirmation) {
+            const shipTo = f.labelFulfillment?.shipTo;
+
+            const labelConfig = fulfillmentPlan?.labelConfiguration || {};
+            const fpOptions = labelConfig?.options || {};
+
+            let signatureOptionCode = null;
+            switch (fpOptions.confirmation) {
                 case 'Delivery':
-                    confirmation = 'DIRECT';
+                    signatureOptionCode = 'DIRECT';
+                    break;
                 case 'Adult':
-                    confirmation = 'ADULT';
+                    signatureOptionCode = 'ADULT';
+                    break;
                 case 'Indirect':
-                    confirmation = 'INDIRECT';
+                    signatureOptionCode = 'INDIRECT';
+                    break;
                 case 'None':
-                    confirmation = null;
+                default:
+                    signatureOptionCode = null;
             }
+
+            const firstPkg = (labelConfig.packages && labelConfig.packages[0]) ? labelConfig.packages[0] : null;
+            const insuredCode = firstPkg?.insuredValue?.code || null;
+            const postagePaidCode = labelConfig?.customs?.postagePaid?.code || null;
+            
+            const rateCode = fulfillmentPlan?.rateSummary?.rate?.totalCost?.code || null;
+            const currency = rateCode || insuredCode || 'USD';
+            const customsCurrency = postagePaidCode || currency;
+
             data = {
                 // json: json,
-                residential: f.labelFulfillment?.shipTo?.residentialIndicator?.toLowerCase() === 'residential',
-                signatureOptionCode: confirmation,
-                currency: currency,
-                customsCurrency: currency,
+                residential: (shipTo?.residentialIndicator || '')?.toLowerCase() === 'residential',
+                signatureOptionCode,
+                currency,
+                customsCurrency,
 
                 senderZip: shipFrom?.postalCode,
                 senderCountry: shipFrom?.countryCode || 'US',

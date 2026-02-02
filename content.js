@@ -225,7 +225,8 @@
 
     // For manual order modal field listeners (avoid double-binding)
     manualOrderFieldListenersBound: new WeakSet(),
-    // prevConfigureShipmentValueSnapByModal: new WeakMap()
+    // prevConfigureShipmentValueSnapByModal: new WeakMap(),
+    // lastFulfillmentPlanId: null
   };
 
   // --- Gate helpers (re-usable “allow once until re-armed”) ---
@@ -531,6 +532,40 @@
     return anyMatcherMatches(title, CONFIG.text.exportTitleMatchers);
   }
 
+  function isFedexAccountCarrierButton(btn) {
+    const name = safeText(btn).toLowerCase();
+    return name.includes('fedex') && name.includes('account') && !name.includes('by shipstation');
+  }
+
+//   function getRateBrowserFulfillmentId(modal) {
+//     // easiest reliable reuse: if shipment modal is open behind, reuse its fulfillmentPlanId
+//     const shipmentModal = document.querySelector(CONFIG.selectors.shipmentModal);
+//     if (shipmentModal) return getShipmentFulfillmentIdFromModal(shipmentModal);
+
+//     // fallback: if you already store last seen shipment fulfillmentId somewhere, use it here
+//     return state.lastFulfillmentPlanId || null;
+//   }
+
+  function getRateRows(modal) {
+    // NOTE: adjust selector to whatever your rate rows use once rates render
+    return Array.from(modal.querySelectorAll('[data-testid="rate-row"], .rate-row, .rate-item'))
+        .filter(Boolean);
+  }
+
+  function getRateRowServiceLabel(rowEl) {
+    // NOTE: adjust to actual service label element in the row
+    return safeText(rowEl.querySelector('.service-name, [data-testid="service-name"]')) || safeText(rowEl);
+  }
+
+  function setRateRowPrice(rowEl, amount) {
+    const priceEl =
+        rowEl.querySelector('.rate-price, [data-testid="rate-price"]') ||
+        rowEl.querySelector('span, div');
+
+    if (!priceEl) return;
+    priceEl.textContent = `$${Number(amount).toFixed(2)}`;
+  }
+
   /********************************************************************
    * Detectors: Rate Browser
    ********************************************************************/
@@ -542,6 +577,9 @@
 
       log("Rate Browser modal detected", { sig: elSig(modal) });
       attachModalObserver(modal, scanRateBrowserModal);
+
+      const runRateBrowserQuote = debouncedRateBrowserQuote();
+      runRateBrowserQuote(modal);
 
       // One immediate scan
       scanRateBrowserModal(modal);
@@ -607,8 +645,8 @@
 
       log("Shipment modal detected", { sig: elSig(modal) });
 
-      const debouncedQuote = debouncedShipmentQuote();
-      debouncedQuote(modal);
+      const runShipmentQuote = debouncedShipmentQuote();
+      runShipmentQuote(modal);
 
       // Attach a debounced observer (not for spam; just to re-run scan when the modal is re-rendered)
       attachModalObserver(modal, scanShipmentModal);
@@ -1080,6 +1118,44 @@
         return q;
     }
 
+    function buildQuoteRequestFromOrderGrid(modal, data, serviceCode, carrierCode) {
+        const q = {
+            carrierCode,
+            serviceCode,
+            sender: {
+                country: data.senderCountry,
+                zip: data.senderZip
+            },
+            receiver: {
+                country: data.receiverCountry,
+                zip: data.receiverZip,
+            },
+            weightUnit: normalizeWeightUnit(data.weightUnit),
+            dimUnit: normalizeDimUnit(data.dimUnit),
+            currency: data.currency,
+            customsCurrency: data.customsCurrency,
+            pieces: [{
+                weight: String(data.weightValue * 1.0),
+                length: String(data.length * 1.0),
+                width: String(data.width * 1.0),
+                height: String(data.height * 1.0),
+                insuranceAmount: data.insuranceAmount > 0
+                    ? String(data.insuranceAmount * 1.0)
+                    : null,
+                declaredValue: null,
+            }],
+            packageTypeCode: "fedex_custom_package",
+            residential: data.residential,
+            signatureOptionCode: data.signatureOptionCode
+        };
+        if (q.receiver && (q.receiver?.zip == null || q?.receiver.country == null)) {
+            const data = parseShipToZipAndCountry(modal);
+            q.receiver.zip = q.receiver.zip ?? data?.zip;
+            q.receiver.country = q.receiver.country ?? data?.country;
+        }
+        return q;
+    }
+
 //    async function buildQuoteRequestBodyFromShipmentModal(modal) {
 //         const orderNumber = getShipmentOrderNumber(modal);
 //         const serviceLabel = getShipmentServiceLabel(modal);
@@ -1366,6 +1442,74 @@
    /********************************************************************
    * API Retriever: call quote API and email service
    ********************************************************************/
+    function debouncedRateBrowserQuote() {
+        return debounce(async (modal) => {
+            upsertTitleSpinner(modal, true);
+
+            // const fulfillmentId = getRateBrowserFulfillmentId(modal);
+            // if (!fulfillmentId) {
+            //     upsertTitleStatus(modal, false);
+            //     return;
+            // }
+
+            const os = await sendMessageAsync({
+                action: 'getOrderGrids',
+                // fulfillmentId,
+                origin: location.origin
+            });
+
+            console.log('Order grid data', os?.data);
+
+            if (!os?.success || !os?.data) {
+                upsertTitleStatus(modal, false);
+                return;
+            }
+
+            // only operate when the FedEx Account carrier is selected
+            const carrierBtns = Array.from(modal.querySelectorAll('.seller-provider-list-item-eRfqP0N'));
+            const selectedCarrier = carrierBtns.find(b => b.classList.contains('selected-DijZlFi'));
+            console.log('Selected carrier', selectedCarrier);
+            if (!selectedCarrier || !isFedexAccountCarrierButton(selectedCarrier)) {
+                upsertTitleStatus(modal, true); // modal is fine, just not the carrier we target
+                return;
+            }
+            
+            // You’ll need to tune these selectors once rates render in the modal
+            const rows = getRateRows(modal);
+            console.log('Rate rows', rows);
+            if (!rows.length) {
+                upsertTitleStatus(modal, false);
+                return;
+            }
+
+            // Quote each service and patch the UI
+            let anyOk = false;
+
+            for (const row of rows) {
+                const serviceLabel = getRateRowServiceLabel(row);
+                const serviceCode = await toServiceCode(serviceLabel);
+                if (!serviceCode) continue;
+
+                const requestBody = buildQuoteRequestFromOrderGrid(
+                    modal,
+                    os.data,
+                    serviceCode,
+                    CONFIG.carrierCode // fedex
+                );
+
+                const quote = await sendMessageAsync({ action: 'callQuoteAPI', requestBody });
+                const ok = !!quote?.data?.totalAmount;
+
+                if (ok) {
+                    anyOk = true;
+                    setRateRowPrice(row, quote.data.totalAmount);
+                }
+            }
+
+            upsertTitleStatus(modal, anyOk);
+        }, 1500);
+    }
+
    function debouncedShipmentQuote() {
         return debounce(async (modal) => {
             upsertTitleSpinner(modal, true);
