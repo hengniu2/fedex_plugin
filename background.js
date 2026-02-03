@@ -169,6 +169,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     //     });
     } else if (request.action == 'getOrderGrids') {
         const orderNumber = request.orderNumber || null;
+        const fulfillmentId = request.fulfillmentId || null;
+        const senderZip = request.senderZip || null;
         const payload = {
             page: { pageNumber: 1, pageSize: 250 },
             filter: {
@@ -184,9 +186,122 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             body: JSON.stringify(payload)
         }).then(response => response.json())
         .then(json => { 
-            sendResponse({ success: true, data: json });
+            // New API format: salesOrders and fulfillmentPlans
+            const salesOrders = json.salesOrders || [];
+            const fulfillmentPlans = json.fulfillmentPlans || [];
+
+            // Find sales order by orderNumber if provided
+            let targetSalesOrder = null;
+            if (orderNumber) {
+                targetSalesOrder = salesOrders.find(so => 
+                    String(so.orderNumber) === String(orderNumber)
+                );
+            }
+
+            // Determine which fulfillment plan to use
+            let targetFulfillmentPlanId = fulfillmentId;
+            if (!targetFulfillmentPlanId && targetSalesOrder) {
+                // Use the first fulfillment plan ID from the sales order
+                targetFulfillmentPlanId = targetSalesOrder.fulfillmentPlanIds?.[0];
+            }
+
+            // Find the fulfillment plan
+            let fulfillmentPlan = null;
+            if (targetFulfillmentPlanId) {
+                fulfillmentPlan = fulfillmentPlans.find(fp =>
+                    String(fp.fulfillmentPlanId) === String(targetFulfillmentPlanId)
+                );
+            }
+
+            // Fallback to first fulfillment plan if not found
+            if (!fulfillmentPlan && fulfillmentPlans.length > 0) {
+                fulfillmentPlan = fulfillmentPlans[0];
+            }
+
+            if (!fulfillmentPlan) {
+                throw new Error('Fulfillment plan not found');
+            }
+
+            // Extract data from fulfillmentPlan.labelConfiguration
+            const labelConfig = fulfillmentPlan.labelConfiguration || {};
+            const shipTo = labelConfig.shipTo || {};
+            const fpOptions = labelConfig.options || {};
+            const firstPkg = (labelConfig.packages && labelConfig.packages.length > 0) 
+                ? labelConfig.packages[0] 
+                : null;
+
+            // Extract confirmation/signature option
+            let signatureOptionCode = null;
+            const confirmation = fpOptions.confirmation || fpOptions.confirmationEnumId;
+            switch (confirmation) {
+                case 'Delivery':
+                case 1: // Delivery enum ID
+                    signatureOptionCode = 'DIRECT';
+                    break;
+                case 'Adult':
+                case 2: // Adult enum ID (if applicable)
+                    signatureOptionCode = 'ADULT';
+                    break;
+                case 'Indirect':
+                case 3: // Indirect enum ID (if applicable)
+                    signatureOptionCode = 'INDIRECT';
+                    break;
+                case 'None':
+                case 0:
+                default:
+                    signatureOptionCode = null;
+            }
+
+            // Extract currency information
+            const insuredCode = firstPkg?.insuredValue?.code || null;
+            const postagePaidCode = labelConfig?.customs?.postagePaid?.code || null;
+            const rateCode = fulfillmentPlan?.rateSummary?.rate?.totalCost?.code || null;
+            const currency = rateCode || insuredCode || 'USD';
+            const customsCurrency = postagePaidCode || currency;
+
+            // Note: shipFrom address is not in the new API response structure
+            // We only have shipFromId. Ship-from address might need to be fetched separately
+            // For now, we'll use the senderZip extracted from DOM if provided
+            const shipFromId = labelConfig.shipFromId;
+
+            // Build response data
+            const data = {
+                residential: (shipTo?.residentialIndicator || '')?.toLowerCase() === 'residential',
+                signatureOptionCode,
+                currency,
+                customsCurrency,
+
+                // Ship-from: use senderZip from DOM if provided, otherwise null
+                senderZip: senderZip || null,
+                senderCountry: 'US', // Default
+
+                receiverZip: shipTo?.postalCode || null,
+                receiverCountry: shipTo?.countryCode || 'US',
+
+                weightUnit: firstPkg?.weight?.unit || null,
+                weightValue: firstPkg?.weight?.value || null,
+
+                dimUnit: firstPkg?.dimensions?.unit || null,
+                length: firstPkg?.dimensions?.length || null,
+                width: firstPkg?.dimensions?.width || null,
+                height: firstPkg?.dimensions?.height || null,
+
+                insuranceAmount: firstPkg?.insuredValue?.value ?? null,
+
+                // Carrier and service IDs - not directly in labelConfig, might need to check elsewhere
+                carrierId: null, // Not in new format
+                serviceId: labelConfig.serviceId || null,
+
+                confirmation: confirmation || null,
+                
+                // Additional fields for reference
+                shipFromId: shipFromId,
+                fulfillmentPlanId: fulfillmentPlan.fulfillmentPlanId
+            };
+
+            sendResponse({ success: true, data: data });
         }).catch(error => {
-            console.error('[Background] Get Shipments API fetch error:', error);
+            console.error('[Background] Get Order Grids API fetch error:', error);
             sendResponse({
                 success: false,
                 error: error.message
@@ -291,6 +406,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         return true;
     } else if (request.action === 'getServices') {
+        console.log('[Background] ============================================');
+        console.log('[Background] STEP 1: getServices action received');
+        console.log('[Background] ============================================');
+        
         const API_CONFIG = {
             baseUrl: 'https://englandship.rocksolidinternet.com',
             customerId: '20602272',
@@ -299,8 +418,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         const url = `${API_CONFIG.baseUrl}/restapi/v1/customers/${API_CONFIG.customerId}/services`;
         
-        console.log('[Background] Calling Services API:', url);
+        console.log('[Background] STEP 2: Preparing API request');
+        console.log('[Background]   - URL:', url);
+        console.log('[Background]   - Method: GET');
+        console.log('[Background]   - Headers:', {
+            'Content-Type': 'application/json',
+            'Authorization': `RSIS ${API_CONFIG.apiKey.substring(0, 10)}...`
+        });
 
+        console.log('[Background] STEP 3: Sending fetch request...');
         fetch(url, {
             method: 'GET',
             headers: {
@@ -309,17 +435,67 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             }
         })
         .then(response => {
+            console.log('[Background] STEP 4: Response received');
+            console.log('[Background]   - Status:', response.status);
+            console.log('[Background]   - Status Text:', response.statusText);
+            console.log('[Background]   - OK:', response.ok);
+            console.log('[Background]   - Headers:', Object.fromEntries(response.headers.entries()));
+            
             if (!response.ok) {
                 return response.text().then(errorText => {
-                    console.error('[Background] Services API error:', response.status, errorText);
+                    console.error('[Background] STEP 4a: ❌ Error Response');
+                    console.error('[Background]   - Status:', response.status);
+                    console.error('[Background]   - Error Text:', errorText);
                     sendResponse({
                         success: false,
                         error: `API error: ${response.status} - ${errorText}`
                     });
                 });
             }
+            
+            console.log('[Background] STEP 5: Parsing JSON response...');
             return response.json().then(data => {
-                console.log('[Background] Services API response received');
+                console.log('[Background] ========== FULL SERVICES API RESPONSE ==========');
+                console.log('[Background] STEP 6: Response Data Analysis');
+                console.log('[Background]   - Data Type:', Array.isArray(data) ? 'ARRAY' : typeof data);
+                console.log('[Background]   - Is Array:', Array.isArray(data));
+                console.log('[Background]   - Length/Size:', Array.isArray(data) ? data.length : Object.keys(data || {}).length);
+                
+                if (Array.isArray(data)) {
+                    console.log('[Background] STEP 7: Array Response Details');
+                    console.log('[Background]   - Total Services:', data.length);
+                    
+                    if (data.length > 0) {
+                        console.log('[Background] STEP 8: First Service (Full Object)');
+                        console.log('[Background]   - Full Object:', JSON.stringify(data[0], null, 2));
+                        console.log('[Background]   - All Keys:', Object.keys(data[0]));
+                        console.log('[Background]   - Property Values:');
+                        Object.keys(data[0]).forEach(key => {
+                            console.log(`[Background]     * ${key}:`, data[0][key], `(type: ${typeof data[0][key]})`);
+                        });
+                        
+                        console.log('[Background] STEP 9: First 3 Services');
+                        data.slice(0, 3).forEach((svc, idx) => {
+                            console.log(`[Background]   Service ${idx + 1}:`, JSON.stringify(svc, null, 2));
+                        });
+                        
+                        console.log('[Background] STEP 10: All Service Labels and Codes');
+                        data.forEach((svc, idx) => {
+                            const label = svc.name || svc.serviceLabel || svc.label || svc.serviceName || 'N/A';
+                            const code = svc.code || svc.serviceCode || svc.carrierApiCode || svc.apiCode || 'N/A';
+                            console.log(`[Background]   [${idx + 1}] Label: "${label}" -> Code: "${code}"`);
+                        });
+                    } else {
+                        console.warn('[Background] ⚠️ Array is empty!');
+                    }
+                } else {
+                    console.log('[Background] STEP 7: Non-Array Response');
+                    console.log('[Background]   - Full Response:', JSON.stringify(data, null, 2));
+                    console.log('[Background]   - Keys:', Object.keys(data || {}));
+                }
+                
+                console.log('[Background] ================================================');
+                console.log('[Background] STEP 11: Sending response to content script');
                 sendResponse({
                     success: true,
                     data: data
@@ -327,7 +503,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             });
         })
         .catch(error => {
-            console.error('[Background] Services API fetch error:', error);
+            console.error('[Background] STEP X: ❌ Fetch Error');
+            console.error('[Background]   - Error Type:', error.constructor.name);
+            console.error('[Background]   - Error Message:', error.message);
+            console.error('[Background]   - Error Stack:', error.stack);
             sendResponse({
                 success: false,
                 error: error.message

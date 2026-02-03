@@ -14,6 +14,31 @@
   const toast = new Toast()
   startLoginMonitor({ toast });
 
+  // Initialize service map at startup
+  (async () => {
+    try {
+      console.log('[Content] ========== Service Map Initialization ==========');
+      console.log('[Content] Checking for buildServiceMap function...');
+      console.log('[Content] window.buildServiceMap type:', typeof window.buildServiceMap);
+      
+      if (typeof window.buildServiceMap === 'function') {
+        console.log('[Content] Calling buildServiceMap...');
+        const map = await window.buildServiceMap();
+        console.log('[Content] ✓ Service map initialized successfully');
+        console.log('[Content] Map has', Object.keys(map || {}).length, 'entries');
+        console.log('[Content] ===============================================');
+      } else {
+        console.warn('[Content] ⚠️ buildServiceMap function not found in window');
+        console.warn('[Content] Available window properties:', Object.keys(window).filter(k => k.includes('Service') || k.includes('build')));
+        console.log('[Content] ===============================================');
+      }
+    } catch (error) {
+      console.error('[Content] ❌ Failed to initialize service map:', error);
+      console.error('[Content] Error stack:', error.stack);
+      console.log('[Content] ===============================================');
+    }
+  })();
+
   /********************************************************************
    * CONFIG: EDIT ONLY HERE
    ********************************************************************/
@@ -38,6 +63,12 @@
       manualOrderModalHintSelectors: [
         'div[class*="drawer-container"]',
         'div[class*="order-details"]',
+      ],
+
+      // Order Drawer (new modal type)
+      orderDrawerHintSelectors: [
+        'div[class*="order-drawer"]',
+        'div[class*="drawer"][class*="order"]',
       ],
 
       // Export dialog footer selector
@@ -111,6 +142,12 @@
       exportTitleMatchers: [
         /\bExport\b/i,
         /\bExport\s*records?\b/i,
+      ],
+
+      // Order Drawer detection
+      orderDrawerTitleMatchers: [
+        /\bOrder\s*Drawer\b/i,
+        /\bOrder\s*Details\b/i,
       ],
     },
 
@@ -210,6 +247,7 @@
     seenRateBrowserModals: new WeakSet(),
     seenShipmentModals: new WeakSet(),
     seenManualOrderModals: new WeakSet(),
+    seenOrderDrawers: new WeakSet(),
     seenExportModals: new WeakSet(),
 
     // Once-per-modal detection that the FedEx Account tile exists
@@ -501,19 +539,26 @@
   }
 
   function isManualOrderModal(modal) {
-    // Strong signal: shipment-details classname exists
-    for (const sel of CONFIG.selectors.manualOrderModalHintSelectors) {
-      if (modal.matches(sel)) return true;
+    // REQUIRED: order-details-drawer-OB4zhHW class must exist (indicates dialog is actually open/visible)
+    // Check if modal itself has the class, or if it contains an element with that class
+    const hasDrawerClass = modal.classList.contains('order-details-drawer-OB4zhHW') || 
+                           modal.querySelector('.order-details-drawer-OB4zhHW') !== null ||
+                           Array.from(modal.classList).some(cls => cls.includes('order-details-drawer'));
+    
+    if (!hasDrawerClass) {
+      // Dialog is not open/visible, don't detect it
+      return false;
     }
 
-    // Otherwise rely on title/content matchers (Manual Orders / Order #)
+    // Dialog is visible, now verify it's a Manual Order by checking title/content
     const title = getManualOrderTitle(modal) || firstTitleText(modal) || safeText(modal);
     return anyMatcherMatches(title, CONFIG.text.manualOrderTitleMatchers);
   }
 
   function isShipmentModal(modal) {
-    // IMPORTANT: do NOT classify as Shipment if it's clearly Manual Order
+    // IMPORTANT: do NOT classify as Shipment if it's clearly Manual Order or Order Drawer
     if (isManualOrderModal(modal)) return false;
+    if (isOrderDrawer(modal)) return false;
 
     // Use title matchers (Configure Shipment / Shipment #)
     const title = firstTitleText(modal) || safeText(modal);
@@ -521,6 +566,17 @@
 
     // Optional hint selectors
     return CONFIG.selectors.shipmentModalHintSelectors.some((sel) => modal.matches(sel));
+  }
+
+  function isOrderDrawer(modal) {
+    // Check hint selectors first
+    for (const sel of CONFIG.selectors.orderDrawerHintSelectors) {
+      if (modal.matches(sel)) return true;
+    }
+
+    // Use title matchers
+    const title = firstTitleText(modal) || safeText(modal);
+    return anyMatcherMatches(title, CONFIG.text.orderDrawerTitleMatchers);
   }
 
   function isExportModal(modal) {
@@ -669,6 +725,11 @@
     state.seenManualOrderModals.add(modal);
 
     log("Manual Order dialog detected", { sig: elSig(modal) });
+
+    // Initialize debounced quote function
+    const runManualOrderQuote = debouncedManualOrderQuote();
+    runManualOrderQuote(modal);
+
     attachModalObserver(modal, scanManualOrderModal);
     // Bind field listeners once (more reliable than mutations for form edits)
     bindConfigureShipmentFieldListeners(modal);
@@ -681,11 +742,8 @@
     state.manualOrderFieldListenersBound.add(modal);
 
     const handler = (e) => {
-      console.log("MADE IT HERE!!!");
       const t = e.target;
       if (!t) return;
-
-      console.log("Handler fired:", e.type, e.target.tagName, e.target.id, e.target.name);
       
       // Ensure this event came from within this modal
       if (!modal.contains(t)) return;
@@ -693,8 +751,6 @@
       // Only care about configured fields
       if (!t.matches?.(CONFIG.selectors.configureShipmentFieldSelectors)) return;
 
-      // Re-arm “shipment_fields_changed” so it can log on each user edit burst (debounced by browser naturally)
-      // If you want once-until-reset behavior, use fireOnceWhileArmed instead.
       log("Configure Shipment field changed", {
         sig: elSig(modal),
         tag: t.tagName,
@@ -704,6 +760,10 @@
           try { return t.value; } catch { return ""; }
         })(),
       });
+
+      // Trigger quote update when form fields change
+      const runManualOrderQuote = debouncedManualOrderQuote();
+      runManualOrderQuote(modal);
     };
 
     // console.log("TEST", modal.querySelector('div[class*="configure-shipment-form"]'), modal.querySelector('div[class*="configure-shipment-form"]').querySelectorAll(CONFIG.selectors.configureShipmentFieldSelectors));
@@ -722,16 +782,13 @@
 
   function scanManualOrderModal(modal) {
     const form = modal.querySelector('div[class*="configure-shipment-form"]');
-    // const test2 = modal.querySelectorAll('section[aria-label*="Configure Shipment"]');
-    // const test3 = modal.querySelectorAll(CONFIG.selectors.configureShipmentFieldSelectors);
-    // console.log('SCAN MANUAL ORDER MODAL', test1, test2, test3, modal);
     
-    // console.log('SCAN MANUAL ORDER MODAL', state.prevConfigureShipmentValueSnapByModal.get(modal));
-
     const changed = configureShipmentSnapshotChanged(modal);
     if (changed) {
         log("Configure Shipment fields changed", { sig: elSig(modal) });
-        // do whatever you need here
+        // Trigger quote update when form fields change
+        const runManualOrderQuote = debouncedManualOrderQuote();
+        runManualOrderQuote(modal);
     } 
 
     // Keep minimal for now (test only).
@@ -748,6 +805,32 @@
         log("Configure Shipment section present", { sig: elSig(modal), title });
       }
     }
+  }
+
+  /********************************************************************
+   * Detectors: Order Drawer
+   ********************************************************************/
+  function detectOrderDrawer(root = document) {
+    const dialogs = root.querySelectorAll(CONFIG.selectors.anyDialog);
+    dialogs.forEach((modal) => {
+      if (!isOrderDrawer(modal)) return;
+      if (state.seenOrderDrawers.has(modal)) return;
+      state.seenOrderDrawers.add(modal);
+
+      log("Order Drawer detected", { sig: elSig(modal) });
+
+      // Initialize debounced quote function
+      const runOrderDrawerQuote = debouncedOrderDrawerQuote();
+      runOrderDrawerQuote(modal);
+
+      attachModalObserver(modal, scanOrderDrawer);
+      scanOrderDrawer(modal);
+    });
+  }
+
+  function scanOrderDrawer(modal) {
+    // Scan for changes that might require quote update
+    // You can add specific detections here later
   }
 
   /********************************************************************
@@ -1010,8 +1093,19 @@
             }
         }
 
-        // Toggle visibility
-        spinner.style.display = show ? 'inline-flex' : 'none';
+        // Toggle visibility - check if spinner is still in DOM
+        if (spinner && spinner.parentElement === pills) {
+            spinner.style.display = show ? 'inline-flex' : 'none';
+        } else if (spinner && !show) {
+            // Spinner exists but is orphaned, try to remove it safely
+            try {
+                if (spinner.parentElement) {
+                    spinner.parentElement.removeChild(spinner);
+                }
+            } catch (e) {
+                // Ignore errors if element is already removed
+            }
+        }
 
         return true;
     }
@@ -1040,11 +1134,42 @@
             align-items: center;
             color: ${ok ? '#10b981' : '#ef4444'};
             `;
-            pills.appendChild(badge);
+            try {
+                pills.appendChild(badge);
+            } catch (e) {
+                // Element might have been removed, return false
+                return false;
+            }
         }
 
-        badge.textContent = ok ? '✓' : '☓';
-        badge.title = ok ? 'Quote updated successfully' : 'Quote failed / using fallback';
+        // Check if badge is still in DOM before updating
+        if (badge && badge.parentElement === pills) {
+            badge.textContent = ok ? '✓' : '☓';
+            badge.title = ok ? 'Quote updated successfully' : 'Quote failed / using fallback';
+            // Always update color: ✓ = green, ☓ = red
+            badge.style.color = ok ? '#10b981' : '#ef4444';
+        } else {
+            // Badge was orphaned, try to recreate it
+            try {
+                badge = document.createElement('span');
+                badge.id = id;
+                badge.style.cssText = `
+                margin-left: 8px;
+                font-weight: 700;
+                font-size: 16px;
+                line-height: 1;
+                display: inline-flex;
+                align-items: center;
+                color: ${ok ? '#10b981' : '#ef4444'};
+                `;
+                badge.textContent = ok ? '✓' : '☓';
+                badge.title = ok ? 'Quote updated successfully' : 'Quote failed / using fallback';
+                pills.appendChild(badge);
+            } catch (e) {
+                return false;
+            }
+        }
+
         return true;
     }
 
@@ -1080,22 +1205,27 @@
         return hit?.originAddress?.postalCode || hit?.postalCode || null;
     }
 
-    function buildQuoteRequestFromShippingGrid(modal, data, serviceCode, carrierCode) {
+    /********************************************************************
+     * Unified Quote Request Builder (used by all modals)
+     ********************************************************************/
+    function buildQuoteRequestFromGrid(modal, data, serviceCode, carrierCode) {
+        // Unified function for building quote requests from grid data
+        // Used by: ShipmentModal, RateBrowserModal, ManualOrderModal, OrderDrawer
         const q = {
             carrierCode,
             serviceCode,
             sender: {
-                country: data.senderCountry,
+                country: data.senderCountry || 'US',
                 zip: data.senderZip
             },
             receiver: {
-                country: data.receiverCountry,
+                country: data.receiverCountry || 'US',
                 zip: data.receiverZip,
             },
             weightUnit: normalizeWeightUnit(data.weightUnit),
             dimUnit: normalizeDimUnit(data.dimUnit),
-            currency: data.currency,
-            customsCurrency: data.customsCurrency,
+            currency: data.currency || 'USD',
+            customsCurrency: data.customsCurrency || 'USD',
             pieces: [{
                 weight: String(data.weightValue * 1.0),
                 length: String(data.length * 1.0),
@@ -1107,51 +1237,15 @@
                 declaredValue: null,
             }],
             packageTypeCode: "fedex_custom_package",
-            residential: data.residential,
-            signatureOptionCode: data.signatureOptionCode
+            residential: data.residential || false,
+            signatureOptionCode: data.signatureOptionCode || null
         };
+        
+        // Fallback for receiver data if missing
         if (q.receiver && (q.receiver?.zip == null || q?.receiver.country == null)) {
-            const data = parseShipToZipAndCountry(modal);
-            q.receiver.zip = q.receiver.zip ?? data?.zip;
-            q.receiver.country = q.receiver.country ?? data?.country;
-        }
-        return q;
-    }
-
-    function buildQuoteRequestFromOrderGrid(modal, data, serviceCode, carrierCode) {
-        const q = {
-            carrierCode,
-            serviceCode,
-            sender: {
-                country: data.senderCountry,
-                zip: data.senderZip
-            },
-            receiver: {
-                country: data.receiverCountry,
-                zip: data.receiverZip,
-            },
-            weightUnit: normalizeWeightUnit(data.weightUnit),
-            dimUnit: normalizeDimUnit(data.dimUnit),
-            currency: data.currency,
-            customsCurrency: data.customsCurrency,
-            pieces: [{
-                weight: String(data.weightValue * 1.0),
-                length: String(data.length * 1.0),
-                width: String(data.width * 1.0),
-                height: String(data.height * 1.0),
-                insuranceAmount: data.insuranceAmount > 0
-                    ? String(data.insuranceAmount * 1.0)
-                    : null,
-                declaredValue: null,
-            }],
-            packageTypeCode: "fedex_custom_package",
-            residential: data.residential,
-            signatureOptionCode: data.signatureOptionCode
-        };
-        if (q.receiver && (q.receiver?.zip == null || q?.receiver.country == null)) {
-            const data = parseShipToZipAndCountry(modal);
-            q.receiver.zip = q.receiver.zip ?? data?.zip;
-            q.receiver.country = q.receiver.country ?? data?.country;
+            const receiverData = parseShipToZipAndCountry(modal);
+            q.receiver.zip = q.receiver.zip ?? receiverData?.zip;
+            q.receiver.country = q.receiver.country ?? receiverData?.country;
         }
         return q;
     }
@@ -1300,21 +1394,31 @@
     async function toServiceCode(serviceLabel) {
         if (!serviceLabel) return null;
 
-        if (!dynamicServiceMap) {
-            dynamicServiceMap = await buildServiceMap();
+        // Use the toServiceCode from helper.js if available
+        if (typeof window.toServiceCode === 'function') {
+            return await window.toServiceCode(serviceLabel);
         }
-        
-        const s = serviceLabel
-            .replace(/[®™]/g, "")
-            .trim()
-            .toLowerCase();
 
-        // direct match
-        if (dynamicServiceMap[s]) return dynamicServiceMap[s];
+        // Fallback: if helper.js hasn't loaded yet, try to build the map
+        console.warn('[Content] window.toServiceCode not available, using fallback');
+        if (typeof window.buildServiceMap === 'function') {
+            const serviceMap = await window.buildServiceMap();
+            const s = serviceLabel
+                .replace(/[®™]/g, "")
+                .trim()
+                .toLowerCase();
 
-        // soft match (e.g., “FedEx Ground®”)
-        const hit = Object.keys(dynamicServiceMap).find(k => s.includes(k));
-        return hit ? dynamicServiceMap[hit] : null;
+            // direct match
+            if (serviceMap && serviceMap[s]) return serviceMap[s];
+
+            // soft match
+            if (serviceMap) {
+                const hit = Object.keys(serviceMap).find(k => s.includes(k));
+                return hit ? serviceMap[hit] : null;
+            }
+        }
+
+        return null;
     }
 
     // Minimal service mapping (extend as you see more values)
@@ -1452,9 +1556,14 @@
             //     return;
             // }
 
+            // Extract sender zip from DOM
+            const senderZip = getSenderZipFromModal(modal);
+            console.log('[RateBrowser] Extracted sender zip:', senderZip);
+            
             const os = await sendMessageAsync({
                 action: 'getOrderGrids',
                 // fulfillmentId,
+                senderZip: senderZip,
                 origin: location.origin
             });
 
@@ -1490,7 +1599,7 @@
                 const serviceCode = await toServiceCode(serviceLabel);
                 if (!serviceCode) continue;
 
-                const requestBody = buildQuoteRequestFromOrderGrid(
+                const requestBody = buildQuoteRequestFromGrid(
                     modal,
                     os.data,
                     serviceCode,
@@ -1531,7 +1640,7 @@
             
             const serviceLabel = getShipmentServiceLabel(modal);
             const serviceCode = await toServiceCode(serviceLabel);
-            const requestBody = buildQuoteRequestFromShippingGrid(modal, ss.data, serviceCode, CONFIG.carrierCode);
+            const requestBody = buildQuoteRequestFromGrid(modal, ss.data, serviceCode, CONFIG.carrierCode);
 
             console.log('Built quote request body', requestBody);
 
@@ -1549,6 +1658,593 @@
             }
 
             upsertTitleStatus(modal, ok);
+        }, 1500);
+    }
+
+     /********************************************************************
+      * Data Extraction: Manual Order Modal
+      ********************************************************************/
+     function getManualOrderOrderNumberFromModal(modal) {
+         console.log('[ManualOrder] Extracting order number from modal');
+         const el = modal.querySelector('[class*="order-number"], .order-info-order-number-vbTaRbB > .h4-yAR2Zwb');
+         console.log('[ManualOrder] Order number element found:', !!el, el?.textContent?.trim());
+         const txt = (el?.textContent || '').trim(); // "Order # 100002" or "Order #100002"
+         const m = txt.match(/Order\s*#\s*(\d+)/i);
+         const orderNumber = m ? m[1] : null;
+         console.log('[ManualOrder] Extracted order number:', orderNumber);
+         return orderNumber;
+     }
+
+     function getSenderZipFromModal(modal) {
+         console.log('[ManualOrder] Extracting sender zip from modal');
+         const el = modal.querySelector('.title-xfcwNVW');
+         if (!el) {
+             console.log('[ManualOrder] Sender zip element not found');
+             return null;
+         }
+         const txt = (el?.textContent || '').trim();
+         console.log('[ManualOrder] Sender zip element text:', txt);
+         
+         // If it's "Test Locale", return "80224"
+         if (txt.toLowerCase() === 'test locale') {
+             console.log('[ManualOrder] Detected "Test Locale", using zip: 80224');
+             return '80224';
+         }
+         
+         // Otherwise, try to extract zip code from the text
+         // Could be just the zip, or could contain other text
+         const zipMatch = txt.match(/\b\d{5}(?:-\d{4})?\b/);
+         if (zipMatch) {
+             console.log('[ManualOrder] Extracted zip from text:', zipMatch[0]);
+             return zipMatch[0];
+         }
+         
+         // If no zip pattern found, return the text as-is (might be just the zip)
+         console.log('[ManualOrder] No zip pattern found, using text as-is:', txt);
+         return txt || null;
+     }
+
+    function getManualOrderServiceLabel(modal) {
+        console.log('[ManualOrder] Extracting service label from modal');
+        // Extract service label from Manual Order modal
+        // Look in Configure Shipment form
+        const form = modal.querySelector('div[class*="configure-shipment-form"]');
+        console.log('[ManualOrder] Configure shipment form found:', !!form);
+        
+        if (form) {
+            const serviceField = form.querySelector('.configure-shipment-form-a7ygSon .flex-column-ZRDBtph .dropdown-field-x5ueAwa .base-combobox-IQILhMX .single-value-zLWJOKx');
+            console.log('[ManualOrder] Service field found:', !!serviceField);
+            if (serviceField) {
+                const serviceLabel = fieldValueState(serviceField);
+                console.log('[ManualOrder] Service label from form field:', serviceLabel);
+                return serviceLabel;
+            }
+        }
+
+        // Fallback: look for service in read-only sections
+        const serviceLabel = getShipmentFieldValue(modal, "Service");
+        console.log('[ManualOrder] Service label from fallback:', serviceLabel);
+        return serviceLabel;
+    }
+
+   /********************************************************************
+   * Data Extraction: Order Drawer
+   ********************************************************************/
+   function getOrderDrawerFulfillmentId(modal) {
+        // Extract fulfillment ID or order number from Order Drawer
+        // Try to find order number in title
+        const title = firstTitleText(modal) || safeText(modal);
+        if (title) {
+            const orderMatch = title.match(/Order\s*#\s*(\d+)/i);
+            if (orderMatch) return orderMatch[1];
+        }
+
+        // Try to find fulfillment ID
+        const fulfillmentEl = modal.querySelector('[class*="fulfillment"], [data-fulfillment-id], [data-testid*="fulfillment"]');
+        if (fulfillmentEl) {
+            const id = fulfillmentEl.getAttribute('data-fulfillment-id') || 
+                      fulfillmentEl.getAttribute('data-testid')?.match(/\d+/)?.[0] ||
+                      safeText(fulfillmentEl).match(/\d+/)?.[0];
+            if (id) return id;
+        }
+
+        return null;
+    }
+
+    function getOrderDrawerServiceLabel(modal) {
+        // Extract service label from Order Drawer
+        // Look for service in various locations
+        const serviceEl = modal.querySelector('[class*="service"], [aria-label*="Service" i], [data-testid*="service"]');
+        if (serviceEl) {
+            return fieldValueState(serviceEl) || safeText(serviceEl);
+        }
+
+        // Fallback: use same method as shipment
+        return getShipmentServiceLabel(modal);
+    }
+
+   /********************************************************************
+   * UI Updates: Manual Order Modal
+   ********************************************************************/
+    function upsertManualOrderSpinner(modal, show) {
+        console.log('[ManualOrder] upsertManualOrderSpinner called:', { show });
+        // Add spinner to Manual Order modal title/header
+        const title = modal.querySelector('.order-info-order-number-vbTaRbB > .h4-yAR2Zwb');
+        console.log('[ManualOrder] Title element found:', !!title);
+        if (!title) {
+            console.error('[ManualOrder] ❌ Title element not found for spinner');
+            return false;
+        }
+
+        const id = 'fedex-ext-manualorder-spinner';
+        let spinner = title.querySelector(`#${id}`);
+
+        if (!spinner && show) {
+            spinner = document.createElement('span');
+            spinner.id = id;
+            spinner.style.cssText = `
+                margin-left: 8px;
+                display: inline-flex;
+                align-items: center;
+                width: 16px;
+                height: 16px;
+            `;
+            spinner.innerHTML = `
+                <span style="
+                    width: 16px;
+                    height: 16px;
+                    border: 2px solid #ccc;
+                    border-top-color: #3b82f6;
+                    border-radius: 50%;
+                    display: inline-block;
+                    animation: fedex-ext-spin 0.6s linear infinite;
+                "></span>
+            `;
+            title.appendChild(spinner);
+
+            if (!document.getElementById('fedex-ext-spinner-style')) {
+                const style = document.createElement('style');
+                style.id = 'fedex-ext-spinner-style';
+                style.textContent = `
+                    @keyframes fedex-ext-spin {
+                        from { transform: rotate(0deg); }
+                        to { transform: rotate(360deg); }
+                    }
+                `;
+                document.head.appendChild(style);
+            }
+        }
+
+        // Toggle visibility - check if spinner is still in DOM
+        if (spinner && spinner.parentElement === title) {
+            spinner.style.display = show ? 'inline-flex' : 'none';
+        } else if (spinner && !show) {
+            // Spinner exists but is orphaned, try to remove it safely
+            try {
+                if (spinner.parentElement) {
+                    spinner.parentElement.removeChild(spinner);
+                }
+            } catch (e) {
+                // Ignore errors if element is already removed
+            }
+        }
+
+        return true;
+    }
+
+    function upsertManualOrderStatus(modal, ok) {
+        console.log('[ManualOrder] upsertManualOrderStatus called:', { ok, status: ok ? 'SUCCESS ✓' : 'FAILED ☓' });
+        // Add status badge to Manual Order modal
+        const title = modal.querySelector('.order-info-order-number-vbTaRbB > .h4-yAR2Zwb');
+        console.log('[ManualOrder] Title element found:', !!title);
+        if (!title) {
+            console.error('[ManualOrder] ❌ Title element not found for status badge');
+            return false;
+        }
+
+        console.log('[ManualOrder] Hiding spinner');
+        upsertManualOrderSpinner(modal, false);
+
+        const id = 'fedex-ext-manualorder-status';
+        let badge = title.querySelector(`#${id}`);
+
+        if (!badge) {
+            console.log('[ManualOrder] Creating new status badge');
+            badge = document.createElement('span');
+            badge.id = id;
+            badge.style.cssText = `
+                margin-left: 8px;
+                font-weight: 700;
+                font-size: 16px;
+                line-height: 1;
+                display: inline-flex;
+                align-items: center;
+                color: ${ok ? '#10b981' : '#ef4444'};
+            `;
+            try {
+                title.appendChild(badge);
+            } catch (e) {
+                console.error('[ManualOrder] ❌ Failed to append badge:', e);
+                return false;
+            }
+        } else {
+            console.log('[ManualOrder] Using existing status badge');
+        }
+
+        // Check if badge is still in DOM before updating
+        if (badge && badge.parentElement === title) {
+            badge.textContent = ok ? '✓' : '☓';
+            badge.title = ok ? 'Quote updated successfully' : 'Quote failed / using fallback';
+            // Always update color: ✓ = green, ☓ = red
+            badge.style.color = ok ? '#10b981' : '#ef4444';
+            console.log('[ManualOrder] ✓ Status badge updated:', ok ? 'SUCCESS ✓' : 'FAILED ☓');
+        } else {
+            // Badge was orphaned, try to recreate it
+            console.log('[ManualOrder] Badge was orphaned, recreating...');
+            try {
+                badge = document.createElement('span');
+                badge.id = id;
+                badge.style.cssText = `
+                    margin-left: 8px;
+                    font-weight: 700;
+                    font-size: 16px;
+                    line-height: 1;
+                    display: inline-flex;
+                    align-items: center;
+                    color: ${ok ? '#10b981' : '#ef4444'};
+                `;
+                badge.textContent = ok ? '✓' : '☓';
+                badge.title = ok ? 'Quote updated successfully' : 'Quote failed / using fallback';
+                title.appendChild(badge);
+                console.log('[ManualOrder] ✓ Status badge recreated');
+            } catch (e) {
+                console.error('[ManualOrder] ❌ Failed to recreate badge:', e);
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    function setManualOrderTotalCost(modal, amountNumber, source = 'quote') {
+        console.log('[ManualOrder] setManualOrderTotalCost called:', { amountNumber, source });
+        // Update rate display in Manual Order modal
+        const rateRow = modal.querySelector('.rate-amount-R6LSuka');
+        console.log('[ManualOrder] Rate row element found:', !!rateRow);
+        
+        if (!rateRow) {
+            console.error('[ManualOrder] ❌ Rate row element not found');
+            return false;
+        }
+
+        const formatted = `$${Number(amountNumber).toFixed(2)}`;
+        console.log('[ManualOrder] Updating rate display:', formatted);
+        rateRow.textContent = `Total Cost: ${formatted}`;
+        rateRow.setAttribute('data-fedex-ext-source', source);
+        console.log('[ManualOrder] ✓ Rate display updated successfully');
+        return true;
+    }
+
+   /********************************************************************
+   * UI Updates: Order Drawer
+   ********************************************************************/
+   function upsertOrderDrawerSpinner(modal, show) {
+        // Add spinner to Order Drawer header/title
+        const title = modal.querySelector('h1, h2, h3, [class*="drawer-header"], [class*="drawer-title"], [class*="order-header"]');
+        if (!title) return false;
+
+        const id = 'fedex-ext-orderdrawer-spinner';
+        let spinner = title.querySelector(`#${id}`);
+
+        if (!spinner && show) {
+            spinner = document.createElement('span');
+            spinner.id = id;
+            spinner.style.cssText = `
+                margin-left: 8px;
+                display: inline-flex;
+                align-items: center;
+                width: 16px;
+                height: 16px;
+            `;
+            spinner.innerHTML = `
+                <span style="
+                    width: 16px;
+                    height: 16px;
+                    border: 2px solid #ccc;
+                    border-top-color: #3b82f6;
+                    border-radius: 50%;
+                    display: inline-block;
+                    animation: fedex-ext-spin 0.6s linear infinite;
+                "></span>
+            `;
+            title.appendChild(spinner);
+
+            if (!document.getElementById('fedex-ext-spinner-style')) {
+                const style = document.createElement('style');
+                style.id = 'fedex-ext-spinner-style';
+                style.textContent = `
+                    @keyframes fedex-ext-spin {
+                        from { transform: rotate(0deg); }
+                        to { transform: rotate(360deg); }
+                    }
+                `;
+                document.head.appendChild(style);
+            }
+        }
+
+        // Toggle visibility - check if spinner is still in DOM
+        if (spinner && spinner.parentElement === title) {
+            spinner.style.display = show ? 'inline-flex' : 'none';
+        } else if (spinner && !show) {
+            // Spinner exists but is orphaned, try to remove it safely
+            try {
+                if (spinner.parentElement) {
+                    spinner.parentElement.removeChild(spinner);
+                }
+            } catch (e) {
+                // Ignore errors if element is already removed
+            }
+        }
+
+        return true;
+    }
+
+    function upsertOrderDrawerStatus(modal, ok) {
+        // Add status badge to Order Drawer
+        const title = modal.querySelector('h1, h2, h3, [class*="drawer-header"], [class*="drawer-title"], [class*="order-header"]');
+        if (!title) return false;
+
+        upsertOrderDrawerSpinner(modal, false);
+
+        const id = 'fedex-ext-orderdrawer-status';
+        let badge = title.querySelector(`#${id}`);
+
+        if (!badge) {
+            badge = document.createElement('span');
+            badge.id = id;
+            badge.style.cssText = `
+                margin-left: 8px;
+                font-weight: 700;
+                font-size: 16px;
+                line-height: 1;
+                display: inline-flex;
+                align-items: center;
+                color: ${ok ? '#10b981' : '#ef4444'};
+            `;
+            try {
+                title.appendChild(badge);
+            } catch (e) {
+                // Element might have been removed, return false
+                return false;
+            }
+        }
+
+        // Check if badge is still in DOM before updating
+        if (badge && badge.parentElement === title) {
+            badge.textContent = ok ? '✓' : '☓';
+            badge.title = ok ? 'Quote updated successfully' : 'Quote failed / using fallback';
+            // Always update color: ✓ = green, ☓ = red
+            badge.style.color = ok ? '#10b981' : '#ef4444';
+        } else {
+            // Badge was orphaned, try to recreate it
+            try {
+                badge = document.createElement('span');
+                badge.id = id;
+                badge.style.cssText = `
+                    margin-left: 8px;
+                    font-weight: 700;
+                    font-size: 16px;
+                    line-height: 1;
+                    display: inline-flex;
+                    align-items: center;
+                    color: ${ok ? '#10b981' : '#ef4444'};
+                `;
+                badge.textContent = ok ? '✓' : '☓';
+                badge.title = ok ? 'Quote updated successfully' : 'Quote failed / using fallback';
+                title.appendChild(badge);
+            } catch (e) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    function setOrderDrawerTotalCost(modal, amountNumber, source = 'quote') {
+        // Update rate display in Order Drawer
+        const rateRow = modal.querySelector('div[class*="rate-"], div[class*="total-cost"], div[class*="shipping-cost"], [class*="rate"] > div');
+        if (!rateRow) return false;
+
+        const formatted = `$${Number(amountNumber).toFixed(2)}`;
+        rateRow.textContent = `Total Cost: ${formatted}`;
+        rateRow.setAttribute('data-fedex-ext-source', source);
+        return true;
+    }
+
+   /********************************************************************
+   * Quote Request Builders: Manual Order & Order Drawer
+   ********************************************************************/
+
+   /********************************************************************
+   * Debounced Quote Functions: Manual Order & Order Drawer
+   ********************************************************************/
+   function debouncedManualOrderQuote() {
+        return debounce(async (modal) => {
+            console.log('[ManualOrder] ========== Quote process started ==========');
+            console.log('[ManualOrder] Modal signature:', elSig(modal));
+            
+            // Step 1: Show spinner
+            console.log('[ManualOrder] Step 1: Showing spinner');
+            upsertManualOrderSpinner(modal, true);
+            
+            // Step 2: Extract order number
+            console.log('[ManualOrder] Step 2: Extracting order number');
+            const orderNumber = getManualOrderOrderNumberFromModal(modal);
+            if (!orderNumber) {
+                console.error('[ManualOrder] ❌ Failed: No order number found');
+                upsertManualOrderStatus(modal, false);
+                return;
+            }
+            console.log('[ManualOrder] ✓ Order number extracted:', orderNumber);
+
+            // Step 3: Extract sender zip from DOM
+            const senderZip = getSenderZipFromModal(modal);
+            console.log('[ManualOrder] Extracted sender zip:', senderZip);
+            
+            // Step 4: Fetch order grid data
+            console.log('[ManualOrder] Step 4: Fetching order grid data');
+            console.log('[ManualOrder] Request params:', { orderNumber, senderZip, origin: location.origin });
+            
+            const orderData = await sendMessageAsync({
+                action: 'getOrderGrids',
+                orderNumber: orderNumber,
+                senderZip: senderZip,
+                origin: location.origin
+            });
+
+            console.log('[ManualOrder] Order grid response received');
+            console.log('[ManualOrder] Order grid success:', orderData?.success);
+            console.log('[ManualOrder] Order grid data keys:', orderData?.data ? Object.keys(orderData.data) : 'no data');
+            console.log('[ManualOrder] Full order grid data:', orderData);
+            
+            if (!orderData?.success || !orderData?.data) {
+                console.error('[ManualOrder] ❌ Failed: Invalid order grid response');
+                console.error('[ManualOrder] Response:', orderData);
+                upsertManualOrderStatus(modal, false);
+                return;
+            }
+            console.log('[ManualOrder] ✓ Order grid data fetched successfully');
+            
+            // Step 4: Extract service label
+            console.log('[ManualOrder] Step 4: Extracting service label');
+            const serviceLabel = getManualOrderServiceLabel(modal);
+            if (!serviceLabel) {
+                console.warn('[ManualOrder] ⚠️ Warning: No service label found, continuing anyway');
+            } else {
+                console.log('[ManualOrder] ✓ Service label extracted:', serviceLabel);
+            }
+            
+            // Step 5: Map service label to service code
+            console.log('[ManualOrder] Step 5: Mapping service label to service code');
+            const serviceCode = await toServiceCode(serviceLabel);
+            if (!serviceCode) {
+                console.warn('[ManualOrder] ⚠️ Warning: Could not map service label to code');
+                console.log('[ManualOrder] Service label was:', serviceLabel);
+            } else {
+                console.log('[ManualOrder] ✓ Service code mapped:', serviceCode);
+            }
+            
+            // Step 6: Build quote request body
+            console.log('[ManualOrder] Step 6: Building quote request body');
+            console.log('[ManualOrder] Grid data structure:', {
+                senderCountry: orderData.data.senderCountry,
+                senderZip: orderData.data.senderZip,
+                receiverCountry: orderData.data.receiverCountry,
+                receiverZip: orderData.data.receiverZip,
+                weightUnit: orderData.data.weightUnit,
+                weightValue: orderData.data.weightValue,
+                dimUnit: orderData.data.dimUnit,
+                length: orderData.data.length,
+                width: orderData.data.width,
+                height: orderData.data.height,
+                residential: orderData.data.residential,
+                signatureOptionCode: orderData.data.signatureOptionCode,
+                insuranceAmount: orderData.data.insuranceAmount,
+                currency: orderData.data.currency
+            });
+            
+            const requestBody = buildQuoteRequestFromGrid(modal, orderData.data, serviceCode, CONFIG.carrierCode);
+
+            console.log('[ManualOrder] ✓ Quote request body built');
+            console.log('[ManualOrder] Request body:', JSON.stringify(requestBody, null, 2));
+
+            // Step 7: Call quote API
+            console.log('[ManualOrder] Step 7: Calling quote API');
+            const quote = await sendMessageAsync({
+                action: 'callQuoteAPI',
+                requestBody
+            });
+
+            console.log('[ManualOrder] Quote API response received');
+            console.log('[ManualOrder] Quote success:', quote?.success);
+            console.log('[ManualOrder] Quote cached:', quote?.cached);
+            console.log('[ManualOrder] Quote deduped:', quote?.deduped);
+            console.log('[ManualOrder] Quote totalAmount:', quote?.data?.totalAmount);
+            console.log('[ManualOrder] Full quote response:', quote);
+
+            // Step 8: Process result
+            const ok = !!quote?.data?.totalAmount;
+            console.log('[ManualOrder] Step 8: Processing result');
+            console.log('[ManualOrder] Quote status:', ok ? 'SUCCESS ✓' : 'FAILED ☓');
+
+            if (ok) {
+                console.log('[ManualOrder] Updating UI with new rate:', quote.data.totalAmount);
+                const updateSuccess = setManualOrderTotalCost(modal, quote.data.totalAmount);
+                console.log('[ManualOrder] UI update result:', updateSuccess ? 'SUCCESS' : 'FAILED');
+            } else {
+                console.error('[ManualOrder] ❌ Quote failed - no totalAmount in response');
+            }
+
+            // Step 9: Update status badge
+            console.log('[ManualOrder] Step 9: Updating status badge');
+            upsertManualOrderStatus(modal, ok);
+            console.log('[ManualOrder] ========== Quote process completed ==========');
+        }, 1500);
+    }
+
+    function debouncedOrderDrawerQuote() {
+        return debounce(async (modal) => {
+            upsertOrderDrawerSpinner(modal, true);
+            
+            const fulfillmentId = getOrderDrawerFulfillmentId(modal);
+            if (!fulfillmentId) {
+                upsertOrderDrawerStatus(modal, false);
+                return;
+            }
+
+            // Extract sender zip from DOM
+            const senderZip = getSenderZipFromModal(modal);
+            console.log('[OrderDrawer] Extracted sender zip:', senderZip);
+            
+            // Try to get order grid data
+            // NOTE: You may need to adjust the API call based on Order Drawer structure
+            const orderData = await sendMessageAsync({
+                action: 'getOrderGrids',
+                orderNumber: fulfillmentId,
+                senderZip: senderZip,
+                origin: location.origin
+            });
+
+            console.log('Order Drawer grid data', orderData);
+            
+            if (!orderData?.success || !orderData?.data) {
+                upsertOrderDrawerStatus(modal, false);
+                return;
+            }
+            
+            const serviceLabel = getOrderDrawerServiceLabel(modal);
+            const serviceCode = await toServiceCode(serviceLabel);
+            
+            // Build request body from order grid data
+            // NOTE: You may need to transform orderData.data to match the expected structure
+            const requestBody = buildQuoteRequestFromGrid(modal, orderData.data, serviceCode, CONFIG.carrierCode);
+
+            console.log('Order Drawer quote request body', requestBody);
+
+            const quote = await sendMessageAsync({
+                action: 'callQuoteAPI',
+                requestBody
+            });
+
+            console.log('Order Drawer quote response', quote);
+
+            const ok = !!quote?.data?.totalAmount;
+
+            if (ok) {
+                setOrderDrawerTotalCost(modal, quote.data.totalAmount);
+            }
+
+            upsertOrderDrawerStatus(modal, ok);
         }, 1500);
     }
 
@@ -1597,9 +2293,10 @@
     // If a rate-browser modal exists inside this subtree, detect it
     detectRateBrowserModal(node);
 
-    // Detect shipment/manual/export dialogs by classification
+    // Detect shipment/manual/order drawer/export dialogs by classification
     detectShipmentModal(node);
     detectManualOrderModal(node);
+    detectOrderDrawer(node);
     detectExportModal(node);
   }
 

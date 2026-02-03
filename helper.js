@@ -302,62 +302,345 @@ function normalizeDimUnit(unit) {
 }
 
 async function fetchServiceList() {
-    if (serviceListCache) return serviceListCache;
+    console.log('[Helper] ============================================');
+    console.log('[Helper] FUNCTION: fetchServiceList() called');
+    console.log('[Helper] ============================================');
+    
+    if (serviceListCache) {
+        console.log('[Helper] STEP 1: Cache Check - HIT');
+        console.log('[Helper]   - Using cached service list');
+        console.log('[Helper]   - Cached services count:', serviceListCache?.length || 0);
+        console.log('[Helper]   - Cache type:', Array.isArray(serviceListCache) ? 'array' : typeof serviceListCache);
+        console.log('[Helper] ============================================');
+        return serviceListCache;
+    }
 
-    const resp = await fetch(`${location.origin}/api/seller/services`, {
-        credentials: "include"
-    });
+    console.log('[Helper] STEP 1: Cache Check - MISS');
+    console.log('[Helper]   - No cache found, fetching from API');
+    
+    console.log('[Helper] STEP 2: Preparing message to background script');
+    const message = { action: 'getServices' };
+    console.log('[Helper]   - Message:', JSON.stringify(message, null, 2));
+    
+    console.log('[Helper] STEP 3: Calling sendMessageAsync...');
+    console.log('[Helper]   - Waiting for background script response...');
+    
+    // Use the getServices action from background.js
+    const response = await sendMessageAsync(message);
+    
+    console.log('[Helper] STEP 4: Response received from background script');
+    console.log('[Helper]   - Full Response Object:', JSON.stringify(response, null, 2));
+    console.log('[Helper]   - Response Properties:');
+    console.log('[Helper]     * success:', response?.success);
+    console.log('[Helper]     * hasData:', !!response?.data);
+    console.log('[Helper]     * dataType:', Array.isArray(response?.data) ? 'array' : typeof response?.data);
+    console.log('[Helper]     * dataLength:', Array.isArray(response?.data) ? response.data.length : 'N/A');
+    console.log('[Helper]     * error:', response?.error);
+    
+    if (!response?.success || !response?.data) {
+        console.error('[Helper] STEP 5: ❌ Response Validation FAILED');
+        console.error('[Helper]   - Success:', response?.success);
+        console.error('[Helper]   - Has Data:', !!response?.data);
+        console.error('[Helper]   - Error:', response?.error);
+        console.error('[Helper]   - Full Response:', response);
+        throw new Error(response?.error || "Failed to fetch service list");
+    }
 
-    if (!resp.ok) throw new Error("Failed to fetch service list");
-
-    const data = await resp.json();
-    serviceListCache = data;
-    return data;
+    console.log('[Helper] STEP 5: Response Validation PASSED');
+    const data = response.data;
+    
+    console.log('[Helper] STEP 6: Processing response data');
+    console.log('[Helper]   - Data Type:', Array.isArray(data) ? 'ARRAY' : typeof data);
+    console.log('[Helper]   - Data Keys (if object):', !Array.isArray(data) && data ? Object.keys(data) : 'N/A');
+    
+    // Handle response structure: could be array directly or wrapped in {services: [...]}
+    let servicesArray = null;
+    
+    if (Array.isArray(data)) {
+        console.log('[Helper] STEP 7: Data is array - using directly');
+        servicesArray = data;
+    } else if (data && typeof data === 'object' && data.services) {
+        console.log('[Helper] STEP 7: Data is object with "services" property');
+        console.log('[Helper]   - Extracting services array from data.services');
+        servicesArray = data.services;
+        console.log('[Helper]   - services array length:', Array.isArray(servicesArray) ? servicesArray.length : 'N/A');
+    } else {
+        console.log('[Helper] STEP 7: Unknown data structure');
+        console.log('[Helper]   - Full Data:', JSON.stringify(data, null, 2));
+    }
+    
+    if (servicesArray && Array.isArray(servicesArray)) {
+        console.log('[Helper] STEP 8: Services array extracted');
+        console.log('[Helper]   - Services count:', servicesArray.length);
+        console.log('[Helper]   - Showing all services:');
+        servicesArray.forEach((svc, idx) => {
+            console.log(`[Helper]   Service [${idx + 1}]:`, JSON.stringify(svc, null, 2));
+        });
+    } else {
+        console.error('[Helper] STEP 8: ❌ Could not extract services array');
+        console.error('[Helper]   - servicesArray:', servicesArray);
+        console.error('[Helper]   - Is Array:', Array.isArray(servicesArray));
+    }
+    
+    console.log('[Helper] STEP 9: Caching service list');
+    serviceListCache = servicesArray || data;
+    console.log('[Helper]   - Cache stored:', Array.isArray(serviceListCache) ? serviceListCache.length : 0, 'services');
+    console.log('[Helper]   - Cache type:', Array.isArray(serviceListCache) ? 'array' : typeof serviceListCache);
+    console.log('[Helper] ============================================');
+    return servicesArray || data;
 }
 
 async function buildServiceMap() {
+    console.log('[Helper] ============================================');
+    console.log('[Helper] FUNCTION: buildServiceMap() called');
+    console.log('[Helper] ============================================');
+    
+    console.log('[Helper] STEP 1: Fetching service list...');
     const services = await fetchServiceList();
-    // const response = await sendMessageAsync({ 
-    //     action: 'fetchServices',
-    //     origin: location.origin 
-    // });
-    // console.log('Service list response', response);
-    // const services = response?.data || [];
-    // console.log('Fetched service list', services);
-
-    const map = {};
-
-    for (const svc of services) {
-        const name = svc.name
-            .replace(/[®™]/g, "")
-            .trim()
-            .toLowerCase();
-
-        map[name] = svc.carrierApiCode;
+    
+    console.log('[Helper] STEP 2: Validating service list');
+    console.log('[Helper]   - Is Array:', Array.isArray(services));
+    console.log('[Helper]   - Type:', typeof services);
+    console.log('[Helper]   - Value:', services);
+    
+    if (!Array.isArray(services)) {
+        console.error('[Helper] STEP 2a: ❌ VALIDATION FAILED');
+        console.error('[Helper]   - Expected: Array');
+        console.error('[Helper]   - Got:', typeof services);
+        console.error('[Helper]   - Value:', JSON.stringify(services, null, 2));
+        return {};
     }
 
+    console.log('[Helper] STEP 2a: ✓ VALIDATION PASSED');
+    console.log('[Helper]   - Services count:', services.length);
+    
+    console.log('[Helper] STEP 3: Initializing map object');
+    const map = {};
+    let skippedCount = 0;
+    let mappedCount = 0;
+
+    console.log('[Helper] STEP 4: Processing each service...');
+    console.log('[Helper]   - Starting loop for', services.length, 'services');
+    
+    for (let i = 0; i < services.length; i++) {
+        const svc = services[i];
+        console.log(`[Helper] ────────────────────────────────────────`);
+        console.log(`[Helper] STEP 4.${i + 1}: Processing service ${i + 1}/${services.length}`);
+        console.log(`[Helper]   - Full Service Object:`, JSON.stringify(svc, null, 2));
+        console.log(`[Helper]   - Service Keys:`, Object.keys(svc));
+        
+        // Map serviceLabel to serviceCode
+        // The API response has 'serviceLabel' and 'serviceCode' properties directly
+        console.log(`[Helper]   STEP 4.${i + 1}.a: Extracting serviceLabel`);
+        console.log(`[Helper]     - svc.serviceLabel:`, svc.serviceLabel);
+        console.log(`[Helper]     - svc.name:`, svc.name);
+        console.log(`[Helper]     - svc.label:`, svc.label);
+        const serviceLabel = svc.serviceLabel || svc.name || svc.label || svc.serviceName;
+        console.log(`[Helper]     - RESULT serviceLabel (raw):`, serviceLabel);
+        console.log(`[Helper]     - serviceLabel type:`, typeof serviceLabel);
+        console.log(`[Helper]     - serviceLabel truthy:`, !!serviceLabel);
+        
+        console.log(`[Helper]   STEP 4.${i + 1}.b: Extracting serviceCode`);
+        console.log(`[Helper]     - svc.serviceCode:`, svc.serviceCode);
+        console.log(`[Helper]     - svc.code:`, svc.code);
+        console.log(`[Helper]     - svc.carrierApiCode:`, svc.carrierApiCode);
+        const serviceCode = svc.serviceCode || svc.code || svc.carrierApiCode || svc.apiCode;
+        console.log(`[Helper]     - RESULT serviceCode (raw):`, serviceCode);
+        console.log(`[Helper]     - serviceCode type:`, typeof serviceCode);
+        console.log(`[Helper]     - serviceCode truthy:`, !!serviceCode);
+        
+        if (!serviceLabel || !serviceCode) {
+            console.warn(`[Helper]   STEP 4.${i + 1}.c: ⚠️ SKIPPING - Missing data`);
+            console.warn(`[Helper]     - Has Label:`, !!serviceLabel, `(${serviceLabel})`);
+            console.warn(`[Helper]     - Has Code:`, !!serviceCode, `(${serviceCode})`);
+            console.warn(`[Helper]     - Full Service Object:`, JSON.stringify(svc, null, 2));
+            skippedCount++;
+            continue;
+        }
+
+        console.log(`[Helper]   STEP 4.${i + 1}.c: ✓ Data validation passed`);
+        
+        // Normalize the service label (remove special chars, lowercase)
+        console.log(`[Helper]   STEP 4.${i + 1}.d: Normalizing serviceLabel`);
+        console.log(`[Helper]     - Original:`, serviceLabel);
+        const step1 = serviceLabel.replace(/[®™]/g, "");
+        console.log(`[Helper]     - After removing ®™:`, step1);
+        const step2 = step1.trim();
+        console.log(`[Helper]     - After trim:`, step2);
+        const normalizedLabel = step2.toLowerCase();
+        console.log(`[Helper]     - After toLowerCase:`, normalizedLabel);
+        console.log(`[Helper]     - FINAL normalizedLabel:`, normalizedLabel);
+        
+        console.log(`[Helper]   STEP 4.${i + 1}.e: Adding to map`);
+        console.log(`[Helper]     - Key:`, normalizedLabel);
+        console.log(`[Helper]     - Value:`, serviceCode);
+        map[normalizedLabel] = serviceCode;
+        mappedCount++;
+        console.log(`[Helper]   STEP 4.${i + 1}.f: ✓ MAPPED: "${normalizedLabel}" -> "${serviceCode}"`);
+    }
+
+    console.log('[Helper] ────────────────────────────────────────');
+    console.log('[Helper] STEP 5: Mapping Complete - Summary');
+    console.log('[Helper] ========== SERVICE MAP SUMMARY ==========');
+    console.log('[Helper]   - Total services processed:', services.length);
+    console.log('[Helper]   - Successfully mapped:', mappedCount);
+    console.log('[Helper]   - Skipped:', skippedCount);
+    console.log('[Helper]   - Map entries:', Object.keys(map).length);
+    console.log('[Helper]   - Map object:', JSON.stringify(map, null, 2));
+    console.log('[Helper]   - All mappings:');
+    Object.entries(map).forEach(([key, value], idx) => {
+        console.log(`[Helper]     [${idx + 1}] "${key}" -> "${value}"`);
+    });
+    console.log('[Helper] =========================================');
+    
+    console.log('[Helper] STEP 6: Storing map in dynamicServiceMap');
+    dynamicServiceMap = map;
+    console.log('[Helper]   - dynamicServiceMap set:', !!dynamicServiceMap);
+    console.log('[Helper]   - dynamicServiceMap keys:', Object.keys(dynamicServiceMap).length);
+    console.log('[Helper] ============================================');
     return map;
 }
 
 async function toServiceCode(serviceLabel) {
-    if (!serviceLabel) return null;
-
-    if (!dynamicServiceMap) {
-        dynamicServiceMap = await buildServiceMap();
+    console.log('[Helper] ============================================');
+    console.log('[Helper] FUNCTION: toServiceCode() called');
+    console.log('[Helper] ============================================');
+    
+    console.log('[Helper] STEP 1: Input Validation');
+    console.log('[Helper]   - Input serviceLabel (raw):', serviceLabel);
+    console.log('[Helper]   - Input type:', typeof serviceLabel);
+    console.log('[Helper]   - Input truthy:', !!serviceLabel);
+    console.log('[Helper]   - Input length:', serviceLabel?.length);
+    
+    if (!serviceLabel) {
+        console.warn('[Helper] STEP 1a: ❌ VALIDATION FAILED');
+        console.warn('[Helper]   - serviceLabel is null/undefined/empty');
+        console.warn('[Helper]   - Returning null');
+        console.log('[Helper] ============================================');
+        return null;
     }
 
-    const s = serviceLabel
-        .replace(/[®™]/g, "")
-        .trim()
-        .toLowerCase();
+    console.log('[Helper] STEP 1a: ✓ VALIDATION PASSED');
+    
+    console.log('[Helper] STEP 2: Checking service map initialization');
+    console.log('[Helper]   - dynamicServiceMap exists:', !!dynamicServiceMap);
+    console.log('[Helper]   - dynamicServiceMap type:', typeof dynamicServiceMap);
+    console.log('[Helper]   - dynamicServiceMap keys count:', dynamicServiceMap ? Object.keys(dynamicServiceMap).length : 0);
+    
+    if (!dynamicServiceMap) {
+        console.log('[Helper] STEP 2a: Service map not initialized');
+        console.log('[Helper]   - Building service map now...');
+        dynamicServiceMap = await buildServiceMap();
+        console.log('[Helper]   - Service map built, keys count:', Object.keys(dynamicServiceMap).length);
+    } else {
+        console.log('[Helper] STEP 2a: ✓ Service map already initialized');
+    }
 
-    // direct match
-    if (dynamicServiceMap[s]) return dynamicServiceMap[s];
+    if (!dynamicServiceMap || Object.keys(dynamicServiceMap).length === 0) {
+        console.warn('[Helper] STEP 2b: ❌ Service map is EMPTY');
+        console.warn('[Helper]   - Cannot map service label:', serviceLabel);
+        console.warn('[Helper]   - Map state:', {
+            exists: !!dynamicServiceMap,
+            isObject: typeof dynamicServiceMap === 'object',
+            keys: dynamicServiceMap ? Object.keys(dynamicServiceMap).length : 0,
+            mapValue: dynamicServiceMap
+        });
+        console.log('[Helper] ============================================');
+        return null;
+    }
 
-    // soft match (e.g., “FedEx Ground®”)
-    const hit = Object.keys(dynamicServiceMap).find(k => s.includes(k));
-    return hit ? dynamicServiceMap[hit] : null;
+    console.log('[Helper] STEP 2b: ✓ Service map is ready');
+    console.log('[Helper]   - Map has', Object.keys(dynamicServiceMap).length, 'entries');
+    console.log('[Helper]   - All map keys:', Object.keys(dynamicServiceMap));
+    
+    console.log('[Helper] STEP 3: Normalizing input serviceLabel');
+    console.log('[Helper]   - Original:', serviceLabel);
+    const step1 = serviceLabel.replace(/[®™]/g, "");
+    console.log('[Helper]   - After removing ®™:', step1);
+    const step2 = step1.trim();
+    console.log('[Helper]   - After trim:', step2);
+    const s = step2.toLowerCase();
+    console.log('[Helper]   - After toLowerCase:', s);
+    console.log('[Helper]   - FINAL normalized:', s);
+
+    console.log('[Helper] STEP 4: Attempting DIRECT match');
+    console.log('[Helper]   - Looking for key:', s);
+    console.log('[Helper]   - Key exists in map:', s in dynamicServiceMap);
+    const directMatch = dynamicServiceMap[s];
+    console.log('[Helper]   - Direct match result:', directMatch);
+    
+    if (directMatch) {
+        console.log('[Helper] STEP 4a: ✓ DIRECT MATCH FOUND!');
+        console.log('[Helper]   - Input:', serviceLabel);
+        console.log('[Helper]   - Normalized:', s);
+        console.log('[Helper]   - Service Code:', directMatch);
+        console.log('[Helper]   - Mapping: "' + s + '" -> "' + directMatch + '"');
+        console.log('[Helper] ============================================');
+        return directMatch;
+    }
+    
+    console.log('[Helper] STEP 4a: ❌ No direct match');
+    console.log('[Helper]   - Tried key:', s);
+    console.log('[Helper]   - Key not found in map');
+
+    console.log('[Helper] STEP 5: Attempting SOFT match');
+    const mapKeys = Object.keys(dynamicServiceMap);
+    console.log('[Helper]   - Total map keys:', mapKeys.length);
+    console.log('[Helper]   - All map keys:', mapKeys);
+    console.log('[Helper]   - Searching for keys that are contained in:', s);
+    
+    const matchingKeys = mapKeys.filter(k => s.includes(k));
+    console.log('[Helper]   - Keys that match (contained in input):', matchingKeys);
+    
+    if (matchingKeys.length > 0) {
+        console.log('[Helper]   - Found', matchingKeys.length, 'matching keys');
+        matchingKeys.forEach((key, idx) => {
+            console.log(`[Helper]     [${idx + 1}] Key: "${key}" -> Value: "${dynamicServiceMap[key]}"`);
+        });
+    }
+    
+    const hit = mapKeys.find(k => s.includes(k));
+    console.log('[Helper]   - First matching key:', hit);
+    
+    if (hit) {
+        const softMatch = dynamicServiceMap[hit];
+        console.log('[Helper] STEP 5a: ✓ SOFT MATCH FOUND!');
+        console.log('[Helper]   - Input:', serviceLabel);
+        console.log('[Helper]   - Normalized:', s);
+        console.log('[Helper]   - Matched Key:', hit);
+        console.log('[Helper]   - Service Code:', softMatch);
+        console.log('[Helper]   - Mapping: "' + hit + '" -> "' + softMatch + '"');
+        console.log('[Helper]   - Reason: Input "' + s + '" contains key "' + hit + '"');
+        console.log('[Helper] ============================================');
+        return softMatch;
+    }
+    
+    console.log('[Helper] STEP 5a: ❌ No soft match found');
+    
+    console.log('[Helper] STEP 6: ❌ NO MATCH FOUND (Summary)');
+    console.log('[Helper]   - Input (raw):', serviceLabel);
+    console.log('[Helper]   - Input (normalized):', s);
+    console.log('[Helper]   - Map has', mapKeys.length, 'keys');
+    console.log('[Helper]   - All available keys:');
+    mapKeys.forEach((key, idx) => {
+        const value = dynamicServiceMap[key];
+        console.log(`[Helper]     [${idx + 1}] "${key}" -> "${value}"`);
+    });
+    console.log('[Helper]   - Comparison:');
+    console.log('[Helper]     * Input normalized:', JSON.stringify(s));
+    mapKeys.forEach((key, idx) => {
+        const contains = s.includes(key);
+        const reverseContains = key.includes(s);
+        console.log(`[Helper]     * Key [${idx + 1}] "${key}": input contains key=${contains}, key contains input=${reverseContains}`);
+    });
+    console.log('[Helper] ============================================');
+    return null;
 }
+
+// Expose functions globally for content.js to use
+window.buildServiceMap = buildServiceMap;
+window.toServiceCode = toServiceCode;
+window.getDynamicServiceMap = () => dynamicServiceMap;
 
 async function fetchShipFromList({ maxAgeMs = 5 * 60 * 1000 } = {}) {
   const now = Date.now();
